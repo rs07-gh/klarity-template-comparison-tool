@@ -624,7 +624,7 @@ class UIComponents:
     @staticmethod
     def create_side_by_side_comparison(section_name: str, section1: ParsedSection, section2: ParsedSection,
                                      file1_name: str, file2_name: str):
-        """Create an enhanced side-by-side comparison view"""
+        """Create an enhanced side-by-side comparison view with inline diff highlighting"""
 
         st.markdown(f"## 📊 Comparing: {section_name}")
 
@@ -642,7 +642,12 @@ class UIComponents:
 
         st.divider()
 
-        # Side-by-side content
+        # Generate side-by-side diff highlighting
+        diff_content1, diff_content2 = UIComponents._generate_side_by_side_diff(
+            section1.prompt, section2.prompt
+        )
+
+        # Side-by-side content with diff highlighting
         col1, col2 = st.columns(2)
 
         with col1:
@@ -666,8 +671,7 @@ class UIComponents:
                     unsafe_allow_html=True
                 )
 
-            # Prompt content
-            formatted_prompt1 = PromptFormatter.format_prompt_for_display(section1.prompt)
+            # Prompt content with diff highlighting
             st.markdown(
                 f"""
                 <div style="
@@ -678,8 +682,9 @@ class UIComponents:
                     min-height: 200px;
                     line-height: 1.6;
                     color: #212529;
+                    font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
                 ">
-                {formatted_prompt1.replace(chr(10), '<br>')}
+                {diff_content1}
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -706,8 +711,7 @@ class UIComponents:
                     unsafe_allow_html=True
                 )
 
-            # Prompt content
-            formatted_prompt2 = PromptFormatter.format_prompt_for_display(section2.prompt)
+            # Prompt content with diff highlighting
             st.markdown(
                 f"""
                 <div style="
@@ -718,12 +722,138 @@ class UIComponents:
                     min-height: 200px;
                     line-height: 1.6;
                     color: #212529;
+                    font-family: 'SF Mono', 'Monaco', 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
                 ">
-                {formatted_prompt2.replace(chr(10), '<br>')}
+                {diff_content2}
                 </div>
                 """,
                 unsafe_allow_html=True
             )
+
+    @staticmethod
+    def _generate_side_by_side_diff(text1: str, text2: str) -> tuple[str, str]:
+        """Generate side-by-side diff highlighting for two text strings"""
+
+        import difflib
+        from html import escape
+
+        # Format the texts for better comparison
+        formatted_text1 = PromptFormatter._enhance_text_formatting(text1)
+        formatted_text2 = PromptFormatter._enhance_text_formatting(text2)
+
+        # Split into lines for line-by-line comparison
+        lines1 = formatted_text1.splitlines()
+        lines2 = formatted_text2.splitlines()
+
+        # Create a differ
+        differ = difflib.SequenceMatcher(None, lines1, lines2)
+
+        # Process the differences
+        highlighted_lines1 = []
+        highlighted_lines2 = []
+
+        for tag, i1, i2, j1, j2 in differ.get_opcodes():
+            if tag == 'equal':
+                # Lines are the same
+                for i in range(i1, i2):
+                    highlighted_lines1.append(escape(lines1[i]))
+                for j in range(j1, j2):
+                    highlighted_lines2.append(escape(lines2[j]))
+
+            elif tag == 'delete':
+                # Lines only in text1 (deleted from text2)
+                for i in range(i1, i2):
+                    highlighted_lines1.append(
+                        f'<span style="background-color: #ffeef0; color: #d73a49; text-decoration: line-through;">'
+                        f'{escape(lines1[i])}</span>'
+                    )
+
+            elif tag == 'insert':
+                # Lines only in text2 (added to text2)
+                for j in range(j1, j2):
+                    highlighted_lines2.append(
+                        f'<span style="background-color: #e6ffed; color: #28a745; font-weight: 500;">'
+                        f'{escape(lines2[j])}</span>'
+                    )
+
+            elif tag == 'replace':
+                # Lines are different, show character-level diff
+                for i in range(i1, i2):
+                    if i - i1 < j2 - j1:  # There's a corresponding line in text2
+                        j = j1 + (i - i1)
+                        char_diff1, char_diff2 = UIComponents._generate_character_diff(
+                            lines1[i], lines2[j]
+                        )
+                        highlighted_lines1.append(char_diff1)
+                        highlighted_lines2.append(char_diff2)
+                    else:
+                        # Extra line in text1 (deleted)
+                        highlighted_lines1.append(
+                            f'<span style="background-color: #ffeef0; color: #d73a49; text-decoration: line-through;">'
+                            f'{escape(lines1[i])}</span>'
+                        )
+
+                # Handle any extra lines in text2 (added)
+                for j in range(j1 + (i2 - i1), j2):
+                    highlighted_lines2.append(
+                        f'<span style="background-color: #e6ffed; color: #28a745; font-weight: 500;">'
+                        f'{escape(lines2[j])}</span>'
+                    )
+
+        # Pad shorter list with empty lines for alignment
+        max_lines = max(len(highlighted_lines1), len(highlighted_lines2))
+        while len(highlighted_lines1) < max_lines:
+            highlighted_lines1.append('<span style="opacity: 0.3; font-style: italic;">[missing line]</span>')
+        while len(highlighted_lines2) < max_lines:
+            highlighted_lines2.append('<span style="opacity: 0.3; font-style: italic;">[missing line]</span>')
+
+        return '<br>'.join(highlighted_lines1), '<br>'.join(highlighted_lines2)
+
+    @staticmethod
+    def _generate_character_diff(line1: str, line2: str) -> tuple[str, str]:
+        """Generate character-level diff highlighting for two lines"""
+
+        import difflib
+        from html import escape
+
+        # Create a character-level differ
+        differ = difflib.SequenceMatcher(None, line1, line2)
+
+        highlighted1 = []
+        highlighted2 = []
+
+        for tag, i1, i2, j1, j2 in differ.get_opcodes():
+            if tag == 'equal':
+                # Characters are the same
+                highlighted1.append(escape(line1[i1:i2]))
+                highlighted2.append(escape(line2[j1:j2]))
+
+            elif tag == 'delete':
+                # Characters only in line1 (deleted)
+                highlighted1.append(
+                    f'<span style="background-color: #ffeef0; color: #d73a49; text-decoration: line-through;">'
+                    f'{escape(line1[i1:i2])}</span>'
+                )
+
+            elif tag == 'insert':
+                # Characters only in line2 (added)
+                highlighted2.append(
+                    f'<span style="background-color: #e6ffed; color: #28a745; font-weight: 500;">'
+                    f'{escape(line2[j1:j2])}</span>'
+                )
+
+            elif tag == 'replace':
+                # Characters are different
+                highlighted1.append(
+                    f'<span style="background-color: #ffeef0; color: #d73a49; text-decoration: line-through;">'
+                    f'{escape(line1[i1:i2])}</span>'
+                )
+                highlighted2.append(
+                    f'<span style="background-color: #e6ffed; color: #28a745; font-weight: 500;">'
+                    f'{escape(line2[j1:j2])}</span>'
+                )
+
+        return ''.join(highlighted1), ''.join(highlighted2)
 
 class SectionMatcher:
     """Intelligent section matching between templates"""

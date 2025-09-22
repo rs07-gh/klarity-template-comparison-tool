@@ -422,8 +422,11 @@ class UIComponents:
     """Enhanced UI components for better UX"""
 
     @staticmethod
-    def create_section_card(section_name: str, section: ParsedSection, expanded: bool = False):
-        """Create a well-formatted section card"""
+    def create_section_card(section_name: str, section: ParsedSection, file_name: str = "", expanded: bool = False):
+        """Create a well-formatted section card with unique keys"""
+
+        # Create unique key prefix using file name and section name
+        unique_key = f"{file_name}_{section_name}".replace(" ", "_").replace(".", "_").replace("/", "_")
 
         # Create status indicator
         status_icon = " ✏️" if (hasattr(section, 'edited') and section.edited) else ""
@@ -469,11 +472,11 @@ class UIComponents:
                 # Action buttons
                 st.markdown("### 🔧 Actions")
 
-                if st.button(f"📝 Edit", key=f"edit_{section_name}", help="Edit this section"):
-                    st.session_state[f"edit_mode_{section_name}"] = True
+                if st.button(f"📝 Edit", key=f"edit_{unique_key}", help="Edit this section"):
+                    st.session_state[f"edit_mode_{unique_key}"] = True
                     st.rerun()
 
-                if st.button(f"📋 Copy", key=f"copy_{section_name}", help="Copy prompt to clipboard"):
+                if st.button(f"📋 Copy", key=f"copy_{unique_key}", help="Copy prompt to clipboard"):
                     st.success("Prompt copied to clipboard!")
 
     @staticmethod
@@ -986,7 +989,7 @@ def browse_all_prompts(all_sections: Dict[str, Dict[str, ParsedSection]], show_d
         # Display sections using enhanced components
         for section_name, section in filtered_sections.items():
             if view_mode == "Detailed":
-                UIComponents.create_section_card(section_name, section, expanded=False)
+                UIComponents.create_section_card(section_name, section, file_name, expanded=False)
             else:
                 # Compact view
                 with st.expander(f"📝 {section_name}" + (" ✏️" if hasattr(section, 'edited') and section.edited else ""), expanded=False):
@@ -1520,7 +1523,8 @@ def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
 
             with col2:
                 # Preview button
-                if st.button(f"👁️ Preview", key=f"preview_{file_name}"):
+                clean_file_name = file_name.replace(" ", "_").replace(".", "_").replace("/", "_")
+                if st.button(f"👁️ Preview", key=f"preview_individual_{clean_file_name}"):
                     with st.expander(f"Preview: {file_name}", expanded=True):
                         for section_name, section in sections.items():
                             st.write(f"**{section_name}**" + (" ✏️" if section.edited else ""))
@@ -1531,7 +1535,7 @@ def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
 
             with col3:
                 # Generate export file
-                clean_name = file_name.replace('.docx', '').replace('.', '_')
+                clean_name = file_name.replace('.docx', '').replace('.', '_').replace(' ', '_').replace('/', '_')
                 export_buffer = DocxExporter.export_template_to_docx(clean_name, sections)
 
                 st.download_button(
@@ -1539,7 +1543,7 @@ def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
                     data=export_buffer.getvalue(),
                     file_name=f"{clean_name}_Klarity_Ready.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    key=f"download_{file_name}"
+                    key=f"download_individual_{clean_name}"
                 )
 
     elif export_mode == "📦 Merged Template (all sections combined)":
@@ -1598,7 +1602,8 @@ def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
                     st.caption(f"{len(sections)} edited sections")
 
                 with col2:
-                    if st.button(f"👁️ Preview", key=f"preview_edited_{file_name}"):
+                    clean_file_name_edited = file_name.replace(" ", "_").replace(".", "_").replace("/", "_")
+                    if st.button(f"👁️ Preview", key=f"preview_edited_{clean_file_name_edited}"):
                         with st.expander(f"Edited Sections: {file_name}", expanded=True):
                             for section_name, section in sections.items():
                                 st.write(f"**{section_name}** ✏️")
@@ -1607,7 +1612,7 @@ def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
                                 st.divider()
 
                 with col3:
-                    clean_name = file_name.replace('.docx', '').replace('.', '_')
+                    clean_name = file_name.replace('.docx', '').replace('.', '_').replace(' ', '_').replace('/', '_')
                     export_buffer = DocxExporter.export_template_to_docx(f"{clean_name}_Edited", sections)
 
                     st.download_button(
@@ -1615,7 +1620,7 @@ def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
                         data=export_buffer.getvalue(),
                         file_name=f"{clean_name}_Edited_Klarity_Ready.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key=f"download_edited_{file_name}"
+                        key=f"download_edited_{clean_name}"
                     )
 
     # Export success message

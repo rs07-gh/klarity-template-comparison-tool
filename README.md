@@ -1,4 +1,4 @@
-# Klarity Template Comparer
+# Klarity Template Comparison Tool
 
 A comprehensive Streamlit application for comparing, editing, and managing prompts embedded as comments in DOCX templates. This enterprise-ready tool provides intelligent section matching, inline editing, and Klarity-friendly export capabilities.
 

@@ -383,7 +383,7 @@ class DocxExporter:
         # Add generation info
         info_para = doc.add_paragraph()
         info_para.add_run(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}").italic = True
-        info_para.add_run("\nKlarity Prompt Generator - Template Comparer").italic = True
+        info_para.add_run("\nKlarity Template Comparison Tool").italic = True
 
         doc.add_paragraph("")  # Spacing
 
@@ -472,7 +472,7 @@ class DiffViewer:
 # Streamlit App
 def main():
     st.set_page_config(
-        page_title="Klarity Template Comparer",
+        page_title="Klarity Template Comparison Tool",
         page_icon="📄",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -487,7 +487,7 @@ def main():
     # Header with branding
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        st.title("🚀 Klarity Template Comparer")
+        st.title("🚀 Klarity Template Comparison Tool")
         st.markdown("*Intelligent DOCX template prompt comparison and editing*")
 
     # Sidebar for file uploads and settings

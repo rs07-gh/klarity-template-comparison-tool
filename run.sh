@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Klarity Template Comparer - Quick Start Script
+# Klarity Template Comparison Tool - Quick Start Script
 
-echo "🚀 Starting Klarity Template Comparer..."
+echo "🚀 Starting Klarity Template Comparison Tool..."
 echo ""
 
 # Check if Python is installed
@@ -32,7 +32,7 @@ else
 fi
 
 echo ""
-echo "🌟 Launching Klarity Template Comparer..."
+echo "🌟 Launching Klarity Template Comparison Tool..."
 echo "📖 The app will open in your default browser"
 echo "🔄 Press Ctrl+C to stop the server"
 echo ""

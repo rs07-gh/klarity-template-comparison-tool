@@ -39,6 +39,28 @@ class SectionMapping:
     confidence: float
     is_manual: bool = False
 
+@dataclass
+class SectionDeviation:
+    section_name: str
+    file1_section: Optional[ParsedSection]
+    file2_section: Optional[ParsedSection]
+    deviation_type: str  # 'content', 'missing', 'added', 'properties', 'identical'
+    similarity_score: float
+    content_diff_chars: int
+    property_differences: List[str]
+    severity: str  # 'high', 'medium', 'low'
+
+    def __post_init__(self):
+        # Auto-calculate severity based on multiple factors
+        if self.deviation_type in ['missing', 'added']:
+            self.severity = 'high'
+        elif self.similarity_score < 50:
+            self.severity = 'high'
+        elif self.similarity_score < 75 or len(self.property_differences) > 1:
+            self.severity = 'medium'
+        else:
+            self.severity = 'low'
+
 class DocxCommentExtractor:
     """Extract comments and their associated section names from DOCX files"""
 
@@ -761,6 +783,134 @@ class SectionMatcher:
 
         return unmapped1, unmapped2
 
+class DeviationAnalyzer:
+    """Intelligent analysis of deviations between templates"""
+
+    @staticmethod
+    def analyze_template_deviations(sections1: Dict[str, ParsedSection],
+                                  sections2: Dict[str, ParsedSection],
+                                  file1_name: str, file2_name: str) -> List[SectionDeviation]:
+        """Analyze all deviations between two templates"""
+
+        deviations = []
+        all_sections = set(sections1.keys()) | set(sections2.keys())
+
+        for section_name in all_sections:
+            deviation = DeviationAnalyzer._analyze_section_deviation(
+                section_name,
+                sections1.get(section_name),
+                sections2.get(section_name)
+            )
+            deviations.append(deviation)
+
+        return sorted(deviations, key=lambda x: (
+            0 if x.severity == 'high' else 1 if x.severity == 'medium' else 2,
+            -x.similarity_score,
+            x.section_name
+        ))
+
+    @staticmethod
+    def _analyze_section_deviation(section_name: str,
+                                 section1: Optional[ParsedSection],
+                                 section2: Optional[ParsedSection]) -> SectionDeviation:
+        """Analyze deviation for a single section"""
+
+        # Handle missing sections
+        if section1 is None:
+            return SectionDeviation(
+                section_name=section_name,
+                file1_section=None,
+                file2_section=section2,
+                deviation_type='added',
+                similarity_score=0.0,
+                content_diff_chars=len(section2.prompt) if section2 else 0,
+                property_differences=['Missing in first template'],
+                severity='high'
+            )
+
+        if section2 is None:
+            return SectionDeviation(
+                section_name=section_name,
+                file1_section=section1,
+                file2_section=None,
+                deviation_type='missing',
+                similarity_score=0.0,
+                content_diff_chars=len(section1.prompt) if section1 else 0,
+                property_differences=['Missing in second template'],
+                severity='high'
+            )
+
+        # Both sections exist - analyze differences
+        similarity_score = fuzz.ratio(section1.prompt, section2.prompt)
+        content_diff_chars = len(section2.prompt) - len(section1.prompt)
+
+        # Check property differences
+        property_differences = []
+        if section1.type != section2.type:
+            property_differences.append(f"Type: {section1.type} → {section2.type}")
+        if section1.sub_type != section2.sub_type:
+            property_differences.append(f"Sub-type: {section1.sub_type} → {section2.sub_type}")
+        if section1.include_screenshots != section2.include_screenshots:
+            property_differences.append(f"Screenshots: {section1.include_screenshots} → {section2.include_screenshots}")
+        if section1.screenshot_instructions != section2.screenshot_instructions:
+            property_differences.append("Screenshot instructions differ")
+
+        # Determine deviation type
+        if similarity_score >= 95 and not property_differences:
+            deviation_type = 'identical'
+        elif property_differences and similarity_score >= 90:
+            deviation_type = 'properties'
+        else:
+            deviation_type = 'content'
+
+        return SectionDeviation(
+            section_name=section_name,
+            file1_section=section1,
+            file2_section=section2,
+            deviation_type=deviation_type,
+            similarity_score=similarity_score,
+            content_diff_chars=content_diff_chars,
+            property_differences=property_differences,
+            severity='low'  # Will be auto-calculated in __post_init__
+        )
+
+    @staticmethod
+    def get_deviation_summary(deviations: List[SectionDeviation]) -> Dict[str, int]:
+        """Get summary statistics of deviations"""
+
+        summary = {
+            'total_sections': len(deviations),
+            'identical': 0,
+            'content_differences': 0,
+            'property_differences': 0,
+            'missing_sections': 0,
+            'added_sections': 0,
+            'high_severity': 0,
+            'medium_severity': 0,
+            'low_severity': 0
+        }
+
+        for dev in deviations:
+            if dev.deviation_type == 'identical':
+                summary['identical'] += 1
+            elif dev.deviation_type == 'content':
+                summary['content_differences'] += 1
+            elif dev.deviation_type == 'properties':
+                summary['property_differences'] += 1
+            elif dev.deviation_type == 'missing':
+                summary['missing_sections'] += 1
+            elif dev.deviation_type == 'added':
+                summary['added_sections'] += 1
+
+            if dev.severity == 'high':
+                summary['high_severity'] += 1
+            elif dev.severity == 'medium':
+                summary['medium_severity'] += 1
+            else:
+                summary['low_severity'] += 1
+
+        return summary
+
 class DocxExporter:
     """Export templates back to Klarity-friendly DOCX format with proper embedded comments"""
 
@@ -1188,9 +1338,10 @@ def main():
         st.metric("📊 Avg Sections/File", f"{avg_sections:.1f}")
 
     # Create enhanced tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📋 Browse All",
         "🔗 Smart Mapping",
+        "⚡ Deviation Analysis",
         "✏️ Edit & Compare",
         "🔍 Diff Analysis",
         "📤 Export"
@@ -1203,12 +1354,15 @@ def main():
         smart_section_mapping(all_sections, match_threshold)
 
     with tab3:
-        edit_and_compare(all_sections)
+        deviation_analysis(all_sections)
 
     with tab4:
-        diff_analysis(all_sections)
+        edit_and_compare(all_sections)
 
     with tab5:
+        diff_analysis(all_sections)
+
+    with tab6:
         export_templates(all_sections)
 
 
@@ -1325,6 +1479,229 @@ def browse_all_prompts(all_sections: Dict[str, Dict[str, ParsedSection]], show_d
         st.info("📭 No sections match your current filters")
     else:
         st.success(f"✅ Displaying {total_displayed} sections across {len(selected_files)} templates")
+
+
+def deviation_analysis(all_sections: Dict[str, Dict[str, ParsedSection]]):
+    """Tab 3: Intelligent deviation analysis between templates"""
+
+    st.header("⚡ Intelligent Deviation Analysis")
+    st.markdown("*Quickly identify and navigate to differences between templates*")
+
+    if len(all_sections) < 2:
+        st.info("📋 Upload at least 2 templates to analyze deviations")
+        return
+
+    # Template selection
+    file_names = list(all_sections.keys())
+    col1, col2 = st.columns(2)
+
+    with col1:
+        file1 = st.selectbox("Primary template:", file_names, key="deviation_file1")
+    with col2:
+        file2 = st.selectbox("Compare with:", [f for f in file_names if f != file1], key="deviation_file2")
+
+    if not file1 or not file2 or file1 == file2:
+        st.info("Select two different templates to analyze deviations")
+        return
+
+    # Analyze deviations
+    sections1 = all_sections[file1]
+    sections2 = all_sections[file2]
+
+    with st.spinner("🔄 Analyzing deviations..."):
+        deviations = DeviationAnalyzer.analyze_template_deviations(sections1, sections2, file1, file2)
+        summary = DeviationAnalyzer.get_deviation_summary(deviations)
+
+    # Summary Dashboard
+    st.subheader("📊 Deviation Summary")
+
+    # Key metrics
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.metric("Total Sections", summary['total_sections'])
+    with col2:
+        st.metric("🔴 High Severity", summary['high_severity'],
+                 delta=f"{summary['high_severity']/summary['total_sections']*100:.1f}%" if summary['total_sections'] > 0 else "0%")
+    with col3:
+        st.metric("🟡 Medium Severity", summary['medium_severity'],
+                 delta=f"{summary['medium_severity']/summary['total_sections']*100:.1f}%" if summary['total_sections'] > 0 else "0%")
+    with col4:
+        st.metric("🟢 Low Severity", summary['low_severity'],
+                 delta=f"{summary['low_severity']/summary['total_sections']*100:.1f}%" if summary['total_sections'] > 0 else "0%")
+    with col5:
+        st.metric("✅ Identical", summary['identical'],
+                 delta=f"{summary['identical']/summary['total_sections']*100:.1f}%" if summary['total_sections'] > 0 else "0%")
+
+    st.divider()
+
+    # Deviation breakdown
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        if summary['content_differences'] > 0:
+            st.metric("📝 Content Differs", summary['content_differences'], delta="Content changes")
+    with col2:
+        if summary['property_differences'] > 0:
+            st.metric("⚙️ Property Differs", summary['property_differences'], delta="Setting changes")
+    with col3:
+        if summary['missing_sections'] > 0:
+            st.metric("❌ Missing", summary['missing_sections'], delta="In template 2", delta_color="inverse")
+    with col4:
+        if summary['added_sections'] > 0:
+            st.metric("➕ Added", summary['added_sections'], delta="In template 2")
+
+    # Quick filters
+    st.subheader("🎛️ Quick Navigation")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        severity_filter = st.multiselect(
+            "Filter by severity:",
+            options=['high', 'medium', 'low'],
+            default=['high', 'medium'],
+            help="Show only deviations of selected severity levels"
+        )
+
+    with col2:
+        type_filter = st.multiselect(
+            "Filter by deviation type:",
+            options=['content', 'properties', 'missing', 'added', 'identical'],
+            default=['content', 'properties', 'missing', 'added'],
+            help="Show only specific types of deviations"
+        )
+
+    with col3:
+        sort_by = st.selectbox(
+            "Sort by:",
+            options=['severity', 'similarity', 'section_name', 'content_size'],
+            index=0,
+            help="Choose how to sort the deviation list"
+        )
+
+    # Filter deviations based on user selection
+    filtered_deviations = [
+        dev for dev in deviations
+        if dev.severity in severity_filter and dev.deviation_type in type_filter
+    ]
+
+    # Sort deviations
+    if sort_by == 'severity':
+        filtered_deviations.sort(key=lambda x: (
+            0 if x.severity == 'high' else 1 if x.severity == 'medium' else 2,
+            x.section_name
+        ))
+    elif sort_by == 'similarity':
+        filtered_deviations.sort(key=lambda x: x.similarity_score)
+    elif sort_by == 'section_name':
+        filtered_deviations.sort(key=lambda x: x.section_name)
+    elif sort_by == 'content_size':
+        filtered_deviations.sort(key=lambda x: abs(x.content_diff_chars), reverse=True)
+
+    st.divider()
+
+    # Deviation details with quick navigation
+    st.subheader(f"🔍 Detailed Analysis ({len(filtered_deviations)} sections)")
+
+    if not filtered_deviations:
+        st.info("No deviations match your current filters")
+        return
+
+    # Display deviations
+    for i, deviation in enumerate(filtered_deviations):
+        # Severity indicator
+        severity_colors = {'high': '🔴', 'medium': '🟡', 'low': '🟢'}
+        severity_icon = severity_colors.get(deviation.severity, '⚪')
+
+        # Deviation type indicator
+        type_icons = {
+            'content': '📝', 'properties': '⚙️', 'missing': '❌',
+            'added': '➕', 'identical': '✅'
+        }
+        type_icon = type_icons.get(deviation.deviation_type, '❓')
+
+        # Create expandable section
+        with st.expander(
+            f"{severity_icon} {type_icon} {deviation.section_name} "
+            f"({deviation.similarity_score:.0f}% similar)",
+            expanded=i < 3  # Auto-expand first 3 high-priority items
+        ):
+            col1, col2 = st.columns([3, 1])
+
+            with col1:
+                # Deviation description
+                if deviation.deviation_type == 'missing':
+                    st.error(f"❌ **Missing in {file2}**")
+                    st.write("This section exists in the first template but is missing in the second template.")
+
+                elif deviation.deviation_type == 'added':
+                    st.success(f"➕ **Added in {file2}**")
+                    st.write("This section exists in the second template but is missing in the first template.")
+
+                elif deviation.deviation_type == 'identical':
+                    st.success("✅ **Identical sections**")
+                    st.write("These sections are identical or nearly identical across both templates.")
+
+                elif deviation.deviation_type == 'properties':
+                    st.warning("⚙️ **Property differences detected**")
+                    for diff in deviation.property_differences:
+                        st.write(f"• {diff}")
+
+                elif deviation.deviation_type == 'content':
+                    st.warning("📝 **Content differences detected**")
+                    if deviation.content_diff_chars != 0:
+                        st.write(f"Content length difference: {deviation.content_diff_chars:+,} characters")
+
+                # Show property differences if any
+                if deviation.property_differences and deviation.deviation_type != 'properties':
+                    st.write("**Additional property differences:**")
+                    for diff in deviation.property_differences:
+                        st.write(f"• {diff}")
+
+            with col2:
+                st.markdown("**📊 Quick Stats:**")
+
+                # Similarity meter
+                if deviation.similarity_score > 0:
+                    similarity_color = "🟢" if deviation.similarity_score >= 75 else "🟡" if deviation.similarity_score >= 50 else "🔴"
+                    st.write(f"**Similarity:** {similarity_color} {deviation.similarity_score:.1f}%")
+
+                # Content size comparison
+                if deviation.file1_section and deviation.file2_section:
+                    len1 = len(deviation.file1_section.prompt)
+                    len2 = len(deviation.file2_section.prompt)
+                    st.write(f"**File 1:** {len1:,} chars")
+                    st.write(f"**File 2:** {len2:,} chars")
+
+                elif deviation.file1_section:
+                    st.write(f"**File 1:** {len(deviation.file1_section.prompt):,} chars")
+                    st.write(f"**File 2:** Missing")
+
+                elif deviation.file2_section:
+                    st.write(f"**File 1:** Missing")
+                    st.write(f"**File 2:** {len(deviation.file2_section.prompt):,} chars")
+
+                # Quick action buttons
+                st.markdown("**🚀 Quick Actions:**")
+
+                # Jump to detailed diff
+                if st.button(f"🔍 View Diff", key=f"diff_jump_{i}_{deviation.section_name}"):
+                    st.session_state['diff_jump_section'] = deviation.section_name
+                    st.session_state['diff_jump_file1'] = file1
+                    st.session_state['diff_jump_file2'] = file2
+                    st.success(f"Navigate to 'Diff Analysis' tab to see detailed comparison for '{deviation.section_name}'")
+
+                # Jump to edit mode
+                if deviation.file1_section and st.button(f"✏️ Edit", key=f"edit_jump_{i}_{deviation.section_name}"):
+                    st.session_state['edit_jump_section'] = deviation.section_name
+                    st.session_state['edit_jump_file'] = file1
+                    st.success(f"Navigate to 'Edit & Compare' tab to edit '{deviation.section_name}'")
+
+    # Summary message
+    if filtered_deviations:
+        total_issues = len([d for d in filtered_deviations if d.deviation_type != 'identical'])
+        if total_issues > 0:
+            st.warning(f"⚠️ Found {total_issues} sections with deviations that may need attention")
+        else:
+            st.success("✅ All analyzed sections are identical or have minimal differences")
 
 
 def smart_section_mapping(all_sections: Dict[str, Dict[str, ParsedSection]], threshold: float):

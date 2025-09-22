@@ -159,7 +159,7 @@ class DocxCommentExtractor:
 
     @staticmethod
     def _parse_comment_string(comment_text: str, section_name: str) -> Optional[ParsedSection]:
-        """Parse comment text to extract structured section data"""
+        """Parse comment text to extract structured section data with intelligent prompt extraction"""
 
         try:
             # Clean and normalize the comment text
@@ -174,7 +174,15 @@ class DocxCommentExtractor:
                 'screenshot_instructions': ''
             }
 
-            # Handle edge case: if comment seems malformed or is just concatenated text
+            # Handle the specific format from Alex's templates:
+            # "type - textsub_type - freeformprompt - [ACTUAL PROMPT]include_screenshots - yesscreenshot_instructions - none"
+
+            # First, let's check if this is the concatenated format (no line breaks)
+            if '\n' not in comment_text and ' - ' in comment_text:
+                # This is likely the concatenated format, let's parse it carefully
+                return DocxCommentExtractor._parse_concatenated_format(comment_text, section_name)
+
+            # Handle multi-line format
             if ' - ' not in comment_text and ': ' not in comment_text and '=' not in comment_text:
                 # Treat entire comment as prompt
                 section_data['prompt'] = comment_text
@@ -188,6 +196,7 @@ class DocxCommentExtractor:
                     raw_comment=comment_text
                 )
 
+            # Parse line-by-line format
             lines = comment_text.split('\n')
 
             for line in lines:
@@ -230,39 +239,18 @@ class DocxCommentExtractor:
                 if not key or not value:
                     continue
 
-                # Normalize key
-                key_normalized = key.lower().replace('_', '').replace(' ', '').replace('-', '')
-
-                try:
-                    if key_normalized in ['type', 'contenttype']:
-                        # Validate type value
-                        clean_type = value.lower().strip()
-                        if clean_type in ['text', 'table']:
-                            section_data['type'] = clean_type
-                    elif key_normalized in ['subtype', 'sub_type', 'style']:
-                        # Validate sub_type value
-                        clean_subtype = value.lower().strip()
-                        if clean_subtype in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']:
-                            section_data['sub_type'] = clean_subtype
-                    elif key_normalized in ['prompt', 'instruction', 'content']:
-                        section_data['prompt'] = value.replace('\\n', '\n')
-                    elif key_normalized in ['includescreenshot', 'include_screenshot', 'screenshot']:
-                        section_data['include_screenshots'] = value.lower().strip() in ['yes', 'true', '1']
-                    elif key_normalized in ['screenshotinstruction', 'screenshot_instruction']:
-                        section_data['screenshot_instructions'] = value if value.lower() != 'none' else ''
-                except Exception as field_error:
-                    # Skip this field if there's an error, but continue processing
-                    continue
+                # Process the key-value pair
+                DocxCommentExtractor._process_key_value(key, value, section_data)
 
             # If no prompt found in structured format, use entire comment as prompt
             if not section_data['prompt'] and len(comment_text.strip()) > 15:
                 section_data['prompt'] = comment_text.strip()
 
             # Final validation - ensure required fields have valid values
-            if section_data['type'] not in ['text', 'table']:
+            if section_data['type'] not in ['text', 'table', 'process_flow_diagram']:
                 section_data['type'] = 'text'
 
-            if section_data['sub_type'] not in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']:
+            if section_data['sub_type'] not in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps', 'bpmn']:
                 section_data['sub_type'] = 'default'
 
             return ParsedSection(
@@ -286,6 +274,131 @@ class DocxCommentExtractor:
                 screenshot_instructions='',
                 raw_comment=comment_text
             )
+
+    @staticmethod
+    def _parse_concatenated_format(comment_text: str, section_name: str) -> ParsedSection:
+        """Parse the concatenated format: 'type - textsub_type - freeformprompt - [CONTENT]include_screenshots - yes...'"""
+
+        section_data = {
+            'type': 'text',
+            'sub_type': 'default',
+            'prompt': '',
+            'include_screenshots': False,
+            'screenshot_instructions': ''
+        }
+
+        # Use regex to extract the different parts more intelligently
+        import re
+
+        # Pattern to match the structured parts
+        # Look for patterns like "key - value" but be smart about the prompt content
+
+        # First, extract type
+        type_match = re.match(r'^type\s*-\s*([^s]*?)sub_type', comment_text)
+        if type_match:
+            type_value = type_match.group(1).strip()
+            # Map special types
+            if type_value == 'process_flow_diagram':
+                section_data['type'] = 'text'  # Process flow diagrams are rendered as text
+            elif type_value in ['text', 'table']:
+                section_data['type'] = type_value
+            else:
+                section_data['type'] = 'text'
+
+        # Extract sub_type
+        subtype_match = re.search(r'sub_type\s*-\s*([^p]*?)prompt\s*-', comment_text)
+        if subtype_match:
+            subtype_value = subtype_match.group(1).strip()
+            # Handle special cases
+            if subtype_value == 'bpmn':
+                section_data['sub_type'] = 'flow-diagram'
+            elif subtype_value in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']:
+                section_data['sub_type'] = subtype_value
+            else:
+                section_data['sub_type'] = 'default'
+
+        # Extract the main prompt content - this is the tricky part
+        # Look for "prompt - " and then capture everything until "include_screenshots"
+        prompt_match = re.search(r'prompt\s*-\s*(.*?)include_screenshots\s*-', comment_text, re.DOTALL)
+        if prompt_match:
+            section_data['prompt'] = prompt_match.group(1).strip().replace('\\n', '\n')
+
+        # Extract screenshots setting
+        screenshot_match = re.search(r'include_screenshots\s*-\s*([^s]*?)screenshot_instructions', comment_text)
+        if screenshot_match:
+            screenshot_value = screenshot_match.group(1).strip().lower()
+            section_data['include_screenshots'] = screenshot_value in ['yes', 'true', '1']
+
+        # Extract screenshot instructions
+        instructions_match = re.search(r'screenshot_instructions\s*-\s*(.*)$', comment_text)
+        if instructions_match:
+            instructions_value = instructions_match.group(1).strip()
+            section_data['screenshot_instructions'] = instructions_value if instructions_value.lower() != 'none' else ''
+
+        # If we couldn't extract a proper prompt, fall back to a cleaned version
+        if not section_data['prompt']:
+            # Try to extract everything after the first "prompt - " occurrence
+            prompt_start = comment_text.find('prompt - ')
+            if prompt_start != -1:
+                remaining_text = comment_text[prompt_start + 9:]  # 9 = len('prompt - ')
+                # Remove trailing metadata
+                for suffix in ['include_screenshots', 'screenshot_instructions']:
+                    pos = remaining_text.find(suffix)
+                    if pos != -1:
+                        remaining_text = remaining_text[:pos]
+                        break
+                section_data['prompt'] = remaining_text.strip().replace('\\n', '\n')
+
+        return ParsedSection(
+            name=section_name,
+            type=section_data['type'],
+            sub_type=section_data['sub_type'],
+            prompt=section_data['prompt'] if section_data['prompt'] else comment_text.strip(),
+            include_screenshots=section_data['include_screenshots'],
+            screenshot_instructions=section_data['screenshot_instructions'],
+            raw_comment=comment_text
+        )
+
+    @staticmethod
+    def _process_key_value(key: str, value: str, section_data: dict):
+        """Process a key-value pair and update section_data"""
+
+        # Normalize key
+        key_normalized = key.lower().replace('_', '').replace(' ', '').replace('-', '')
+
+        try:
+            if key_normalized in ['type', 'contenttype']:
+                # Handle special type mappings
+                clean_type = value.lower().strip()
+                if clean_type == 'process_flow_diagram':
+                    section_data['type'] = 'text'
+                elif clean_type in ['text', 'table']:
+                    section_data['type'] = clean_type
+                else:
+                    section_data['type'] = 'text'
+
+            elif key_normalized in ['subtype', 'sub_type', 'style']:
+                # Handle special subtype mappings
+                clean_subtype = value.lower().strip()
+                if clean_subtype == 'bpmn':
+                    section_data['sub_type'] = 'flow-diagram'
+                elif clean_subtype in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']:
+                    section_data['sub_type'] = clean_subtype
+                else:
+                    section_data['sub_type'] = 'default'
+
+            elif key_normalized in ['prompt', 'instruction', 'content']:
+                section_data['prompt'] = value.replace('\\n', '\n')
+
+            elif key_normalized in ['includescreenshot', 'include_screenshot', 'screenshot']:
+                section_data['include_screenshots'] = value.lower().strip() in ['yes', 'true', '1']
+
+            elif key_normalized in ['screenshotinstruction', 'screenshot_instruction']:
+                section_data['screenshot_instructions'] = value if value.lower() != 'none' else ''
+
+        except Exception as field_error:
+            # Skip this field if there's an error, but continue processing
+            pass
 
 class PromptFormatter:
     """Convert JSON prompts to readable markdown format with enhanced UX"""
@@ -357,18 +470,24 @@ class PromptFormatter:
         text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Max 2 newlines
         text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
 
+        # Handle escaped newlines from comment parsing first
+        text = text.replace('\\n', '\n')
+
         # Convert numbered lists with better formatting
         text = re.sub(r'(?:^|\n)(\d+)\.[ \t]*', r'\n\n\1. ', text)
 
-        # Convert bullet points with consistent formatting
+        # Convert bullet points with consistent formatting - preserve special bullet chars
         text = re.sub(r'(?:^|\n)[•·*-][ \t]*', r'\n- ', text)
 
-        # Emphasize key phrases
-        text = re.sub(r'"([^"]+)"', r'**\1**', text)  # Quoted text
-        text = re.sub(r'\b([A-Z]{2,})\b', r'**\1**', text)  # ALL CAPS words
+        # Convert markdown bold to HTML for better display in containers
+        text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', text)
 
-        # Handle escaped newlines from comment parsing
-        text = text.replace('\\n', '\n')
+        # Emphasize key phrases
+        text = re.sub(r'"([^"]+)"', r'<strong>\1</strong>', text)  # Quoted text
+        text = re.sub(r'\b([A-Z]{2,})\b', r'<strong>\1</strong>', text)  # ALL CAPS words
+
+        # Handle special formatting for instructions and examples
+        text = re.sub(r'Example user quote: "([^"]+)"', r'<em>Example user quote: "<strong>\1</strong>"</em>', text)
 
         # Clean up extra whitespace at start/end
         text = text.strip()
@@ -451,6 +570,7 @@ class UIComponents:
                         border-left: 4px solid #007bff;
                         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                         line-height: 1.6;
+                        color: #212529;
                     ">
                     {formatted_prompt.replace(chr(10), '<br>')}
                     </div>
@@ -516,6 +636,7 @@ class UIComponents:
                         border-radius: 0.25rem;
                         margin-bottom: 1rem;
                         font-size: 0.9em;
+                        color: #212529;
                     ">
                     {PromptFormatter.create_section_property_display(section1, show_stats=False).replace(chr(10), '<br>')}
                     </div>
@@ -534,6 +655,7 @@ class UIComponents:
                     border-left: 4px solid #28a745;
                     min-height: 200px;
                     line-height: 1.6;
+                    color: #212529;
                 ">
                 {formatted_prompt1.replace(chr(10), '<br>')}
                 </div>
@@ -554,6 +676,7 @@ class UIComponents:
                         border-radius: 0.25rem;
                         margin-bottom: 1rem;
                         font-size: 0.9em;
+                        color: #212529;
                     ">
                     {PromptFormatter.create_section_property_display(section2, show_stats=False).replace(chr(10), '<br>')}
                     </div>
@@ -572,6 +695,7 @@ class UIComponents:
                     border-left: 4px solid #dc3545;
                     min-height: 200px;
                     line-height: 1.6;
+                    color: #212529;
                 ">
                 {formatted_prompt2.replace(chr(10), '<br>')}
                 </div>
@@ -1204,7 +1328,10 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
         with col1b:
             subtype_options = ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']
             current_subtype = edited_data.get('sub_type', 'default')
-            if current_subtype not in subtype_options:
+            # Handle legacy or special subtypes
+            if current_subtype == 'bpmn':
+                current_subtype = 'flow-diagram'
+            elif current_subtype not in subtype_options:
                 current_subtype = 'default'
 
             new_sub_type = st.selectbox(
@@ -1265,6 +1392,7 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
                 line-height: 1.6;
                 max-height: 400px;
                 overflow-y: auto;
+                color: #212529;
             ">
             {formatted_prompt.replace(chr(10), '<br>')}
             </div>

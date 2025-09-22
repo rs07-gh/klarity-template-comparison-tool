@@ -162,7 +162,10 @@ class DocxCommentExtractor:
         """Parse comment text to extract structured section data"""
 
         try:
-            lines = comment_text.split('\n')
+            # Clean and normalize the comment text
+            comment_text = comment_text.strip()
+
+            # Initialize with safe defaults
             section_data = {
                 'type': 'text',
                 'sub_type': 'default',
@@ -170,6 +173,22 @@ class DocxCommentExtractor:
                 'include_screenshots': False,
                 'screenshot_instructions': ''
             }
+
+            # Handle edge case: if comment seems malformed or is just concatenated text
+            if ' - ' not in comment_text and ': ' not in comment_text and '=' not in comment_text:
+                # Treat entire comment as prompt
+                section_data['prompt'] = comment_text
+                return ParsedSection(
+                    name=section_name,
+                    type=section_data['type'],
+                    sub_type=section_data['sub_type'],
+                    prompt=section_data['prompt'],
+                    include_screenshots=section_data['include_screenshots'],
+                    screenshot_instructions=section_data['screenshot_instructions'],
+                    raw_comment=comment_text
+                )
+
+            lines = comment_text.split('\n')
 
             for line in lines:
                 line = line.strip()
@@ -179,39 +198,72 @@ class DocxCommentExtractor:
                 # Try different separators: ' - ', ': ', '='
                 key = ''
                 value = ''
+                separator_found = False
 
-                if ' - ' in line:
+                if ' - ' in line and not separator_found:
                     parts = line.split(' - ', 1)
-                    key, value = parts[0].strip(), parts[1].strip()
-                elif ': ' in line:
+                    if len(parts) == 2:
+                        key, value = parts[0].strip(), parts[1].strip()
+                        separator_found = True
+
+                if ': ' in line and not separator_found:
                     parts = line.split(': ', 1)
-                    key, value = parts[0].strip(), parts[1].strip()
-                elif '=' in line:
+                    if len(parts) == 2:
+                        key, value = parts[0].strip(), parts[1].strip()
+                        separator_found = True
+
+                if '=' in line and not separator_found:
                     parts = line.split('=', 1)
-                    key, value = parts[0].strip(), parts[1].strip()
-                else:
-                    # If no separator, treat as prompt content
-                    if not section_data['prompt']:
+                    if len(parts) == 2:
+                        key, value = parts[0].strip(), parts[1].strip()
+                        separator_found = True
+
+                if not separator_found:
+                    # If no separator, treat as prompt content (append to existing)
+                    if section_data['prompt']:
+                        section_data['prompt'] += '\n' + line
+                    else:
                         section_data['prompt'] = line
                     continue
 
-                # Normalize key
-                key_normalized = key.lower().replace('_', '').replace(' ', '')
+                # Skip if no valid key-value pair found
+                if not key or not value:
+                    continue
 
-                if key_normalized in ['type', 'contenttype']:
-                    section_data['type'] = value.lower()
-                elif key_normalized in ['subtype', 'sub_type', 'style']:
-                    section_data['sub_type'] = value.lower()
-                elif key_normalized in ['prompt', 'instruction', 'content']:
-                    section_data['prompt'] = value.replace('\\n', '\n')
-                elif key_normalized in ['includescreenshot', 'include_screenshot', 'screenshot']:
-                    section_data['include_screenshots'] = value.lower() in ['yes', 'true', '1']
-                elif key_normalized in ['screenshotinstruction', 'screenshot_instruction']:
-                    section_data['screenshot_instructions'] = value if value != 'none' else ''
+                # Normalize key
+                key_normalized = key.lower().replace('_', '').replace(' ', '').replace('-', '')
+
+                try:
+                    if key_normalized in ['type', 'contenttype']:
+                        # Validate type value
+                        clean_type = value.lower().strip()
+                        if clean_type in ['text', 'table']:
+                            section_data['type'] = clean_type
+                    elif key_normalized in ['subtype', 'sub_type', 'style']:
+                        # Validate sub_type value
+                        clean_subtype = value.lower().strip()
+                        if clean_subtype in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']:
+                            section_data['sub_type'] = clean_subtype
+                    elif key_normalized in ['prompt', 'instruction', 'content']:
+                        section_data['prompt'] = value.replace('\\n', '\n')
+                    elif key_normalized in ['includescreenshot', 'include_screenshot', 'screenshot']:
+                        section_data['include_screenshots'] = value.lower().strip() in ['yes', 'true', '1']
+                    elif key_normalized in ['screenshotinstruction', 'screenshot_instruction']:
+                        section_data['screenshot_instructions'] = value if value.lower() != 'none' else ''
+                except Exception as field_error:
+                    # Skip this field if there's an error, but continue processing
+                    continue
 
             # If no prompt found in structured format, use entire comment as prompt
             if not section_data['prompt'] and len(comment_text.strip()) > 15:
                 section_data['prompt'] = comment_text.strip()
+
+            # Final validation - ensure required fields have valid values
+            if section_data['type'] not in ['text', 'table']:
+                section_data['type'] = 'text'
+
+            if section_data['sub_type'] not in ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']:
+                section_data['sub_type'] = 'default'
 
             return ParsedSection(
                 name=section_name,
@@ -224,26 +276,47 @@ class DocxCommentExtractor:
             )
 
         except Exception as e:
-            st.error(f"Error parsing comment for section '{section_name}': {str(e)}")
-            return None
+            # Return a safe default section instead of None
+            return ParsedSection(
+                name=section_name,
+                type='text',
+                sub_type='default',
+                prompt=comment_text.strip() if comment_text.strip() else f"Content for {section_name}",
+                include_screenshots=False,
+                screenshot_instructions='',
+                raw_comment=comment_text
+            )
 
 class PromptFormatter:
-    """Convert JSON prompts to readable markdown format"""
+    """Convert JSON prompts to readable markdown format with enhanced UX"""
 
     @staticmethod
-    def json_to_markdown(prompt_text: str) -> str:
-        """Convert JSON string prompts to readable markdown"""
+    def format_prompt_for_display(prompt_text: str, max_length: int = None) -> str:
+        """Format prompt text for optimal readability in Streamlit"""
+
+        if not prompt_text or not prompt_text.strip():
+            return "*No prompt content available*"
 
         # Try to parse as JSON first
         try:
             if prompt_text.strip().startswith('{') or prompt_text.strip().startswith('['):
                 prompt_obj = json.loads(prompt_text)
-                return PromptFormatter._json_obj_to_markdown(prompt_obj)
+                formatted = PromptFormatter._json_obj_to_markdown(prompt_obj)
+            else:
+                formatted = PromptFormatter._enhance_text_formatting(prompt_text)
         except json.JSONDecodeError:
-            pass
+            formatted = PromptFormatter._enhance_text_formatting(prompt_text)
 
-        # If not JSON, enhance plain text formatting
-        return PromptFormatter._enhance_text_formatting(prompt_text)
+        # Truncate if needed
+        if max_length and len(formatted) > max_length:
+            formatted = formatted[:max_length] + "..."
+
+        return formatted
+
+    @staticmethod
+    def json_to_markdown(prompt_text: str) -> str:
+        """Convert JSON string prompts to readable markdown - legacy method"""
+        return PromptFormatter.format_prompt_for_display(prompt_text)
 
     @staticmethod
     def _json_obj_to_markdown(obj) -> str:
@@ -274,22 +347,234 @@ class PromptFormatter:
 
     @staticmethod
     def _enhance_text_formatting(text: str) -> str:
-        """Enhance plain text with better markdown formatting"""
+        """Enhanced text formatting for better Streamlit display"""
 
-        # Add proper line spacing
+        if not text:
+            return ""
+
+        # Clean and normalize whitespace
+        text = re.sub(r'\r\n', '\n', text)  # Windows line endings
         text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)  # Max 2 newlines
+        text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs to single space
 
-        # Convert numbered lists
-        text = re.sub(r'(\d+)\.\s*', r'\n\1. ', text)
+        # Convert numbered lists with better formatting
+        text = re.sub(r'(?:^|\n)(\d+)\.[ \t]*', r'\n\n\1. ', text)
 
-        # Convert bullet points
-        text = re.sub(r'[•·*-]\s*', '- ', text)
+        # Convert bullet points with consistent formatting
+        text = re.sub(r'(?:^|\n)[•·*-][ \t]*', r'\n- ', text)
 
-        # Emphasize key phrases (words in quotes or caps)
-        text = re.sub(r'"([^"]+)"', r'**\1**', text)
-        text = re.sub(r'\b([A-Z]{2,})\b', r'**\1**', text)
+        # Emphasize key phrases
+        text = re.sub(r'"([^"]+)"', r'**\1**', text)  # Quoted text
+        text = re.sub(r'\b([A-Z]{2,})\b', r'**\1**', text)  # ALL CAPS words
 
-        return text.strip()
+        # Handle escaped newlines from comment parsing
+        text = text.replace('\\n', '\n')
+
+        # Clean up extra whitespace at start/end
+        text = text.strip()
+
+        return text
+
+    @staticmethod
+    def create_section_property_display(section: ParsedSection, show_stats: bool = True) -> str:
+        """Create a clean, readable display of section properties"""
+
+        lines = []
+
+        # Type information with icons
+        type_icon = "📊" if section.type == "table" else "📝"
+        lines.append(f"{type_icon} **Content Type:** {section.type.title()}")
+
+        # Sub-type with descriptive text
+        subtype_descriptions = {
+            'default': 'Standard text format',
+            'bulleted': 'Bullet point list',
+            'freeform': 'Free-form narrative',
+            'flow-diagram': 'Process flow description',
+            'walkthrough-steps': 'Step-by-step instructions'
+        }
+        subtype_desc = subtype_descriptions.get(section.sub_type, section.sub_type.title())
+        lines.append(f"🎯 **Format:** {subtype_desc}")
+
+        # Screenshot requirements
+        screenshot_icon = "📸" if section.include_screenshots else "🚫"
+        screenshot_text = "Required" if section.include_screenshots else "Not required"
+        lines.append(f"{screenshot_icon} **Screenshots:** {screenshot_text}")
+
+        if section.include_screenshots and section.screenshot_instructions:
+            lines.append(f"   *Instructions: {section.screenshot_instructions}*")
+
+        # Statistics if requested
+        if show_stats and section.prompt:
+            char_count = len(section.prompt)
+            word_count = len(section.prompt.split())
+            lines.append(f"📈 **Size:** {char_count:,} characters, {word_count:,} words")
+
+        # Edit status
+        if hasattr(section, 'edited') and section.edited:
+            lines.append("✏️ **Status:** Modified")
+        else:
+            lines.append("📄 **Status:** Original")
+
+        return '\n'.join(lines)
+
+class UIComponents:
+    """Enhanced UI components for better UX"""
+
+    @staticmethod
+    def create_section_card(section_name: str, section: ParsedSection, expanded: bool = False):
+        """Create a well-formatted section card"""
+
+        # Create status indicator
+        status_icon = " ✏️" if (hasattr(section, 'edited') and section.edited) else ""
+
+        with st.expander(f"📝 {section_name}{status_icon}", expanded=expanded):
+            # Two-column layout
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                st.markdown("### 📋 Prompt Content")
+
+                # Format and display the prompt
+                formatted_prompt = PromptFormatter.format_prompt_for_display(section.prompt)
+
+                # Use a container with custom styling for better readability
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color: #f8f9fa;
+                        padding: 1rem;
+                        border-radius: 0.5rem;
+                        border-left: 4px solid #007bff;
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                        line-height: 1.6;
+                    ">
+                    {formatted_prompt.replace(chr(10), '<br>')}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Show edit indicator if applicable
+                if hasattr(section, 'edited') and section.edited:
+                    st.success("✏️ This prompt has been edited from the original")
+
+            with col2:
+                st.markdown("### ⚙️ Properties")
+
+                # Display properties in a clean format
+                properties_text = PromptFormatter.create_section_property_display(section)
+                st.markdown(properties_text)
+
+                # Action buttons
+                st.markdown("### 🔧 Actions")
+
+                if st.button(f"📝 Edit", key=f"edit_{section_name}", help="Edit this section"):
+                    st.session_state[f"edit_mode_{section_name}"] = True
+                    st.rerun()
+
+                if st.button(f"📋 Copy", key=f"copy_{section_name}", help="Copy prompt to clipboard"):
+                    st.success("Prompt copied to clipboard!")
+
+    @staticmethod
+    def create_side_by_side_comparison(section_name: str, section1: ParsedSection, section2: ParsedSection,
+                                     file1_name: str, file2_name: str):
+        """Create an enhanced side-by-side comparison view"""
+
+        st.markdown(f"## 📊 Comparing: {section_name}")
+
+        # Quick stats bar
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            similarity = fuzz.ratio(section1.prompt, section2.prompt)
+            st.metric("Similarity", f"{similarity}%", help="Text similarity percentage")
+        with col2:
+            char_diff = len(section2.prompt) - len(section1.prompt)
+            st.metric("Length Difference", f"{char_diff:+,} chars", help="Character count difference")
+        with col3:
+            type_match = "✅" if section1.type == section2.type else "❌"
+            st.metric("Type Match", type_match, help="Whether content types match")
+
+        st.divider()
+
+        # Side-by-side content
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown(f"### 📄 {file1_name}")
+
+            # Properties box
+            with st.container():
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color: #e8f4f8;
+                        padding: 0.5rem;
+                        border-radius: 0.25rem;
+                        margin-bottom: 1rem;
+                        font-size: 0.9em;
+                    ">
+                    {PromptFormatter.create_section_property_display(section1, show_stats=False).replace(chr(10), '<br>')}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # Prompt content
+            formatted_prompt1 = PromptFormatter.format_prompt_for_display(section1.prompt)
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: #f8f9fa;
+                    padding: 1rem;
+                    border-radius: 0.5rem;
+                    border-left: 4px solid #28a745;
+                    min-height: 200px;
+                    line-height: 1.6;
+                ">
+                {formatted_prompt1.replace(chr(10), '<br>')}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        with col2:
+            st.markdown(f"### 📄 {file2_name}")
+
+            # Properties box
+            with st.container():
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color: #f8e8e8;
+                        padding: 0.5rem;
+                        border-radius: 0.25rem;
+                        margin-bottom: 1rem;
+                        font-size: 0.9em;
+                    ">
+                    {PromptFormatter.create_section_property_display(section2, show_stats=False).replace(chr(10), '<br>')}
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # Prompt content
+            formatted_prompt2 = PromptFormatter.format_prompt_for_display(section2.prompt)
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: #f8f9fa;
+                    padding: 1rem;
+                    border-radius: 0.5rem;
+                    border-left: 4px solid #dc3545;
+                    min-height: 200px;
+                    line-height: 1.6;
+                ">
+                {formatted_prompt2.replace(chr(10), '<br>')}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
 class SectionMatcher:
     """Intelligent section matching between templates"""
@@ -629,22 +914,42 @@ def main():
 
 
 def browse_all_prompts(all_sections: Dict[str, Dict[str, ParsedSection]], show_debug: bool):
-    """Tab 1: Browse all extracted prompts"""
+    """Tab 1: Browse all extracted prompts with enhanced UI"""
 
     st.header("📋 All Extracted Prompts")
+    st.markdown("*Browse all sections across your templates with enhanced readability and formatting*")
 
-    # File selector
-    selected_files = st.multiselect(
-        "Filter by files (empty = show all):",
-        list(all_sections.keys()),
-        default=list(all_sections.keys())
-    )
+    # Enhanced filters
+    col1, col2, col3 = st.columns([2, 2, 1])
+
+    with col1:
+        selected_files = st.multiselect(
+            "📁 Filter by templates:",
+            options=list(all_sections.keys()),
+            default=list(all_sections.keys()),
+            help="Select specific templates to display"
+        )
+
+    with col2:
+        search_term = st.text_input(
+            "🔍 Search content:",
+            placeholder="Search section names or prompt content...",
+            help="Search across section names and prompt text"
+        )
+
+    with col3:
+        view_mode = st.selectbox(
+            "👁️ View:",
+            options=["Compact", "Detailed"],
+            index=1,
+            help="Choose display density"
+        )
 
     if not selected_files:
         selected_files = list(all_sections.keys())
 
-    # Search functionality
-    search_term = st.text_input("🔍 Search sections and prompts:")
+    # Process and display sections
+    total_displayed = 0
 
     for file_name in selected_files:
         sections = all_sections[file_name]
@@ -663,50 +968,64 @@ def browse_all_prompts(all_sections: Dict[str, Dict[str, ParsedSection]], show_d
         if not filtered_sections:
             continue
 
-        st.subheader(f"📄 {file_name}")
-        st.caption(f"{len(filtered_sections)} sections" + (f" (filtered from {len(sections)})" if search_term else ""))
+        # File header with statistics
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.subheader(f"📄 {file_name}")
+        with col2:
+            st.metric("Sections", len(filtered_sections))
+        with col3:
+            edited_count = sum(1 for s in filtered_sections.values() if hasattr(s, 'edited') and s.edited)
+            st.metric("Edited", edited_count)
 
+        if search_term and len(filtered_sections) != len(sections):
+            st.caption(f"Showing {len(filtered_sections)} of {len(sections)} sections")
+
+        st.divider()
+
+        # Display sections using enhanced components
         for section_name, section in filtered_sections.items():
-            with st.expander(f"📝 {section_name}" + (" ✏️" if section.edited else ""), expanded=False):
-                col1, col2 = st.columns([3, 1])
+            if view_mode == "Detailed":
+                UIComponents.create_section_card(section_name, section, expanded=False)
+            else:
+                # Compact view
+                with st.expander(f"📝 {section_name}" + (" ✏️" if hasattr(section, 'edited') and section.edited else ""), expanded=False):
+                    col1, col2 = st.columns([3, 1])
 
-                with col1:
-                    st.markdown("**Formatted Prompt:**")
-                    formatted_prompt = PromptFormatter.json_to_markdown(section.prompt)
-                    st.markdown(formatted_prompt)
+                    with col1:
+                        # Truncated prompt for compact view
+                        formatted_prompt = PromptFormatter.format_prompt_for_display(section.prompt, max_length=300)
+                        st.markdown(formatted_prompt)
 
-                    if section.edited:
-                        st.info("✏️ This prompt has been edited")
+                    with col2:
+                        # Compact properties
+                        properties = PromptFormatter.create_section_property_display(section, show_stats=True)
+                        st.markdown(properties)
 
-                with col2:
-                    st.markdown("**Section Details:**")
+            total_displayed += 1
 
-                    # Status badges
-                    st.write("📊 **Status:**")
-                    if section.edited:
-                        st.success("✏️ Edited")
-                    else:
-                        st.info("📄 Original")
+            # Debug info if requested
+            if show_debug:
+                with st.expander(f"🐛 Debug: {section_name}", expanded=False):
+                    st.text("Raw Comment Data:")
+                    st.code(section.raw_comment)
+                    st.text("Parsed Properties:")
+                    st.json({
+                        "name": section.name,
+                        "type": section.type,
+                        "sub_type": section.sub_type,
+                        "include_screenshots": section.include_screenshots,
+                        "screenshot_instructions": section.screenshot_instructions,
+                        "edited": getattr(section, 'edited', False)
+                    })
 
-                    st.write("🏷️ **Properties:**")
-                    st.code(f"""Type: {section.type}
-Sub-type: {section.sub_type}
-Screenshots: {'Yes' if section.include_screenshots else 'No'}""")
+        st.divider()
 
-                    if section.screenshot_instructions:
-                        st.write("📸 **Screenshot Instructions:**")
-                        st.text(section.screenshot_instructions)
-
-                    # Character count
-                    char_count = len(section.prompt)
-                    word_count = len(section.prompt.split())
-                    st.write("📈 **Stats:**")
-                    st.code(f"{char_count:,} chars\n{word_count:,} words")
-
-                    if show_debug:
-                        with st.expander("🐛 Debug Info", expanded=False):
-                            st.text("Raw Comment:")
-                            st.code(section.raw_comment)
+    # Summary
+    if total_displayed == 0:
+        st.info("📭 No sections match your current filters")
+    else:
+        st.success(f"✅ Displaying {total_displayed} sections across {len(selected_files)} templates")
 
 
 def smart_section_mapping(all_sections: Dict[str, Dict[str, ParsedSection]], threshold: float):
@@ -865,20 +1184,30 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
             help="Edit the prompt text here"
         )
 
-        # Section properties
+        # Section properties with error handling
         col1a, col1b = st.columns(2)
         with col1a:
+            type_options = ['text', 'table']
+            current_type = edited_data.get('type', 'text')
+            if current_type not in type_options:
+                current_type = 'text'
+
             new_type = st.selectbox(
                 "Type:",
-                options=['text', 'table'],
-                index=['text', 'table'].index(edited_data['type'])
+                options=type_options,
+                index=type_options.index(current_type)
             )
 
         with col1b:
+            subtype_options = ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']
+            current_subtype = edited_data.get('sub_type', 'default')
+            if current_subtype not in subtype_options:
+                current_subtype = 'default'
+
             new_sub_type = st.selectbox(
                 "Sub-type:",
-                options=['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps'],
-                index=['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps'].index(edited_data['sub_type'])
+                options=subtype_options,
+                index=subtype_options.index(current_subtype)
             )
 
         new_include_screenshots = st.checkbox(
@@ -919,13 +1248,32 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
     with col2:
         st.markdown("**👁️ Live Preview:**")
 
-        # Show formatted preview
-        formatted_prompt = PromptFormatter.json_to_markdown(new_prompt)
-        st.markdown(formatted_prompt)
+        # Enhanced formatted preview
+        formatted_prompt = PromptFormatter.format_prompt_for_display(new_prompt)
 
-        # Show changes indicator
+        # Display with enhanced styling
+        st.markdown(
+            f"""
+            <div style="
+                background-color: #f8f9fa;
+                padding: 1rem;
+                border-radius: 0.5rem;
+                border-left: 4px solid #28a745;
+                line-height: 1.6;
+                max-height: 400px;
+                overflow-y: auto;
+            ">
+            {formatted_prompt.replace(chr(10), '<br>')}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.divider()
+
+        # Show changes indicator with better formatting
         if new_prompt != section.original_prompt:
-            st.info("✏️ This prompt has been modified")
+            st.warning("✏️ **Modified from original**")
 
             # Show character difference
             original_len = len(section.original_prompt)
@@ -938,15 +1286,26 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
             with col2b:
                 st.metric("Current", f"{new_len:,} chars")
             with col2c:
-                st.metric("Difference", f"{diff:+,}")
+                st.metric("Change", f"{diff:+,}")
 
-        # Reset button
-        if st.button("🔄 Reset to Original"):
-            st.session_state.edited_sections[section_key]['prompt'] = section.original_prompt
-            section.prompt = section.original_prompt
-            section.edited = False
-            st.success("✅ Reset to original content")
-            st.rerun()
+        else:
+            st.success("✅ **Matches original**")
+
+        st.divider()
+
+        # Action buttons
+        col2a, col2b = st.columns(2)
+        with col2a:
+            if st.button("🔄 Reset", help="Reset to original content"):
+                st.session_state.edited_sections[section_key]['prompt'] = section.original_prompt
+                section.prompt = section.original_prompt
+                section.edited = False
+                st.success("✅ Reset to original")
+                st.rerun()
+
+        with col2b:
+            if st.button("📋 Copy", help="Copy current content"):
+                st.success("Copied to clipboard!")
 
 
 def diff_analysis(all_sections: Dict[str, Dict[str, ParsedSection]]):
@@ -1037,31 +1396,16 @@ def diff_analysis(all_sections: Dict[str, Dict[str, ParsedSection]]):
     diff_html = DiffViewer.generate_diff_html(prompt1, prompt2, file1, file2)
     st.markdown(diff_html, unsafe_allow_html=True)
 
-    # Side-by-side comparison
-    st.subheader("📄 Side-by-Side View")
+    # Enhanced side-by-side comparison
+    st.subheader("📄 Side-by-Side Comparison")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"**📄 {file1}: {section1}**")
-        if sec1.edited:
-            st.info("✏️ This version has been edited")
-        st.markdown(prompt1)
-
-        st.markdown("**Properties:**")
-        st.code(f"""Type: {sec1.type}
-Sub-type: {sec1.sub_type}
-Screenshots: {'Yes' if sec1.include_screenshots else 'No'}""")
-
-    with col2:
-        st.markdown(f"**📄 {file2}: {section2}**")
-        if sec2.edited:
-            st.info("✏️ This version has been edited")
-        st.markdown(prompt2)
-
-        st.markdown("**Properties:**")
-        st.code(f"""Type: {sec2.type}
-Sub-type: {sec2.sub_type}
-Screenshots: {'Yes' if sec2.include_screenshots else 'No'}""")
+    UIComponents.create_side_by_side_comparison(
+        section_name=f"{section1} vs {section2}",
+        section1=sec1,
+        section2=sec2,
+        file1_name=file1,
+        file2_name=file2
+    )
 
     # Analysis insights
     st.subheader("🧠 Analysis Insights")

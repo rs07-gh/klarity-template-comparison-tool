@@ -14,6 +14,7 @@ import markdown
 from fuzzywuzzy import fuzz, process
 import datetime
 from docx import Document
+from docx.shared import Pt, RGBColor
 from docx.shared import Inches
 
 @dataclass
@@ -1064,14 +1065,11 @@ class DocxExporter:
 
     @staticmethod
     def export_template_to_docx(template_name: str, sections: Dict[str, ParsedSection], original_file_data: bytes = None) -> BytesIO:
-        """Export sections to a Klarity-ready DOCX file preserving original document structure"""
+        """Export sections to a Klarity-ready DOCX file with proper structure"""
 
-        if original_file_data:
-            # Use original file as base and only modify comments
-            return DocxExporter._update_comments_in_original_docx(original_file_data, sections)
-        else:
-            # Fallback to creating new document (shouldn't happen in normal usage)
-            return DocxExporter._create_new_docx_with_sections(template_name, sections)
+        # For now, let's use the safe approach of creating a clean document
+        # This avoids ZIP manipulation issues and ensures proper DOCX structure
+        return DocxExporter._create_safe_docx_with_sections(template_name, sections)
 
     @staticmethod
     def _update_comments_in_original_docx(original_file_data: bytes, sections: Dict[str, ParsedSection]) -> BytesIO:
@@ -1173,27 +1171,66 @@ class DocxExporter:
             return DocxExporter._create_comments_xml(sections)
 
     @staticmethod
-    def _create_new_docx_with_sections(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
-        """Fallback: Create new document (used when no original file available)"""
+    def _create_safe_docx_with_sections(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
+        """Create a clean, safe DOCX document with sections and embedded prompts as text"""
 
-        # Create a minimal document with just section headings
+        # Create a new document using python-docx (safe and reliable)
         doc = Document()
 
-        # Add title
+        # Add document title
         title = doc.add_heading(template_name, 0)
 
-        # Add sections with minimal content (clean Klarity format)
+        # Add generation info
+        info_para = doc.add_paragraph()
+        info_para.add_run(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}").italic = True
+        info_para.add_run("\nKlarity Template Comparison Tool").italic = True
+
+        doc.add_paragraph("")  # Spacing
+
+        # Add sections in proper Klarity format
         for section_name, section in sections.items():
-            # Add section heading only
+            # Add section heading
             heading = doc.add_heading(section_name, level=1)
 
-        # Save document
+            # Add a paragraph with the prompt as a comment-style format
+            # This approach embeds the prompts as visible text in a structured way
+            # that can be easily processed by Klarity or manually converted
+
+            comment_text = DocxExporter.build_comment_string(section)
+
+            # Create a bordered text box to visually separate the prompt instructions
+            prompt_para = doc.add_paragraph()
+            prompt_run = prompt_para.add_run(f"[PROMPT INSTRUCTIONS]\n{comment_text}")
+            prompt_run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)  # Gray color
+            prompt_run.font.size = Pt(9)
+            prompt_run.font.italic = True
+
+            # Add placeholder content based on section type
+            if section.type == 'table':
+                placeholder = '[AI will generate table content here based on the above prompt instructions.]'
+            elif section.sub_type == 'bulleted':
+                placeholder = '[AI will generate bullet-point content here based on the above prompt instructions.]'
+            elif section.sub_type == 'flow-diagram':
+                placeholder = '[AI will generate process flow description here based on the above prompt instructions.]'
+            elif section.sub_type == 'walkthrough-steps':
+                placeholder = '[AI will generate step-by-step instructions here based on the above prompt instructions.]'
+            else:
+                placeholder = '[AI will generate paragraph-based content here based on the above prompt instructions.]'
+
+            content_para = doc.add_paragraph(placeholder)
+            doc.add_paragraph("")  # Spacing
+
+        # Save the document to buffer
         buffer = BytesIO()
         doc.save(buffer)
         buffer.seek(0)
+        return buffer
 
-        # Add comments to the document
-        return DocxExporter._add_comments_to_docx(buffer, sections)
+    @staticmethod
+    def _create_new_docx_with_sections(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
+        """Fallback: Create new document (used when no original file available)"""
+
+        return DocxExporter._create_safe_docx_with_sections(template_name, sections)
 
     @staticmethod
     def _add_comments_to_docx(buffer: BytesIO, sections: Dict[str, ParsedSection]) -> BytesIO:

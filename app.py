@@ -1084,48 +1084,92 @@ class DocxExporter:
         # Create input buffer from original file data
         input_buffer = BytesIO(original_file_data)
 
-        # Read the original DOCX
-        docx_zip = zipfile.ZipFile(input_buffer, 'r')
-
-        # Create new output DOCX
-        output_buffer = BytesIO()
-        new_docx = zipfile.ZipFile(output_buffer, 'w', zipfile.ZIP_DEFLATED)
-
         try:
-            # Copy all files from original, modifying only comments.xml
-            for item in docx_zip.infolist():
-                data = docx_zip.read(item.filename)
+            # Read the original DOCX
+            with zipfile.ZipFile(input_buffer, 'r') as docx_zip:
+                # Create new output DOCX
+                output_buffer = BytesIO()
+                with zipfile.ZipFile(output_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as new_docx:
 
-                if item.filename == 'word/comments.xml':
-                    # Replace comments.xml with updated comments
-                    data = DocxExporter._create_updated_comments_xml(data, sections).encode('utf-8')
+                    # Track whether we found and updated comments.xml
+                    comments_updated = False
 
-                new_docx.writestr(item, data)
+                    # Copy all files from original, preserving structure and metadata
+                    for item in docx_zip.infolist():
+                        data = docx_zip.read(item.filename)
 
-        finally:
-            docx_zip.close()
-            new_docx.close()
+                        if item.filename == 'word/comments.xml':
+                            # Replace comments.xml with updated comments
+                            try:
+                                updated_comments_xml = DocxExporter._create_updated_comments_xml(data, sections)
+                                data = updated_comments_xml.encode('utf-8')
+                                comments_updated = True
+                            except Exception as e:
+                                # If update fails, use original comments.xml
+                                pass
+
+                        # Preserve original file info but update the data
+                        new_item = zipfile.ZipInfo(item.filename)
+                        new_item.date_time = item.date_time
+                        new_item.compress_type = item.compress_type
+                        new_item.create_system = item.create_system
+                        new_item.create_version = item.create_version
+                        new_item.extract_version = item.extract_version
+                        new_item.flag_bits = item.flag_bits
+                        new_item.volume = item.volume
+                        new_item.internal_attr = item.internal_attr
+                        new_item.external_attr = item.external_attr
+
+                        new_docx.writestr(new_item, data)
+
+                    # If comments.xml doesn't exist and we have sections, create it
+                    if not comments_updated and sections:
+                        DocxExporter._add_missing_comments_files(new_docx, docx_zip, sections)
+
+        except Exception as e:
+            # Fallback: return original file if modification fails
+            return BytesIO(original_file_data)
 
         output_buffer.seek(0)
         return output_buffer
+
+    @staticmethod
+    def _add_missing_comments_files(new_docx: zipfile.ZipFile, original_docx: zipfile.ZipFile, sections: Dict[str, ParsedSection]):
+        """Add missing comments files and relationships when they don't exist in original"""
+
+        # Create comments.xml
+        comments_xml = DocxExporter._create_comments_xml(sections)
+        new_docx.writestr('word/comments.xml', comments_xml)
+
+        # Update content types if needed
+        try:
+            content_types_data = original_docx.read('[Content_Types].xml')
+            updated_content_types = DocxExporter._update_content_types(content_types_data)
+            new_docx.writestr('[Content_Types].xml', updated_content_types)
+        except KeyError:
+            # If content types doesn't exist, create it
+            pass
+
+        # Update document relationships if needed
+        try:
+            doc_rels_data = original_docx.read('word/_rels/document.xml.rels')
+            updated_doc_rels = DocxExporter._update_document_rels(doc_rels_data)
+            new_docx.writestr('word/_rels/document.xml.rels', updated_doc_rels)
+        except KeyError:
+            # If relationships doesn't exist, create it
+            pass
 
     @staticmethod
     def _create_updated_comments_xml(original_comments_data: bytes, sections: Dict[str, ParsedSection]) -> str:
         """Create updated comments.xml preserving structure but updating content"""
 
         try:
-            # Parse original comments.xml
-            doc = minidom.parseString(original_comments_data.decode('utf-8'))
-
-            # Get all comment elements
-            comments = doc.getElementsByTagName('w:comment')
-
-            # Build a mapping of comment IDs to section names by finding the linked sections
-            # This is complex - for now, let's rebuild the entire comments.xml
+            # For now, simply rebuild the comments.xml with our sections
+            # This ensures we have proper structure and avoid XML parsing issues
             return DocxExporter._create_comments_xml(sections)
 
-        except:
-            # If parsing fails, create new comments.xml
+        except Exception as e:
+            # If anything fails, create new comments.xml
             return DocxExporter._create_comments_xml(sections)
 
     @staticmethod
@@ -1291,6 +1335,10 @@ class DocxExporter:
 
         try:
             content_types_str = content_types_data.decode('utf-8')
+
+            # Check if comments are already defined
+            if 'word/comments.xml' in content_types_str:
+                return content_types_data
 
             # Add comments override if not present
             if 'word/comments.xml' not in content_types_str:

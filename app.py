@@ -1065,11 +1065,93 @@ class DocxExporter:
 
     @staticmethod
     def export_template_to_docx(template_name: str, sections: Dict[str, ParsedSection], original_file_data: bytes = None) -> BytesIO:
-        """Export sections to a Klarity-ready DOCX file with proper structure"""
+        """Export sections to a Klarity-ready DOCX file with proper embedded comments"""
 
-        # For now, let's use the safe approach of creating a clean document
-        # This avoids ZIP manipulation issues and ensures proper DOCX structure
-        return DocxExporter._create_safe_docx_with_sections(template_name, sections)
+        if original_file_data:
+            # Use original file as base and update only the comments (proper approach)
+            return DocxExporter._update_comments_in_original_docx_safe(original_file_data, sections)
+        else:
+            # Fallback: create document with only headings and embedded comments
+            return DocxExporter._create_clean_docx_with_embedded_comments(template_name, sections)
+
+    @staticmethod
+    def _update_comments_in_original_docx_safe(original_file_data: bytes, sections: Dict[str, ParsedSection]) -> BytesIO:
+        """Safely update comments in the original DOCX file while preserving all structure"""
+
+        import zipfile
+        import tempfile
+        import shutil
+        from xml.dom import minidom
+
+        try:
+            # Create temporary files for safer processing
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as temp_input:
+                temp_input.write(original_file_data)
+                temp_input_path = temp_input.name
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as temp_output:
+                temp_output_path = temp_output.name
+
+            # Copy the original file to output location first
+            shutil.copy2(temp_input_path, temp_output_path)
+
+            # Now modify only the comments.xml within the copied file
+            with zipfile.ZipFile(temp_output_path, 'a') as zip_file:
+                # Check if comments.xml exists
+                file_list = zip_file.namelist()
+
+                # Create or update comments.xml
+                comments_xml_content = DocxExporter._create_comments_xml(sections)
+
+                # Remove existing comments.xml if present
+                if 'word/comments.xml' in file_list:
+                    # Create a new ZIP without the old comments.xml
+                    DocxExporter._replace_file_in_zip(temp_output_path, 'word/comments.xml', comments_xml_content.encode('utf-8'))
+                else:
+                    # Add comments.xml to existing ZIP
+                    zip_file.writestr('word/comments.xml', comments_xml_content.encode('utf-8'))
+
+            # Read the result back
+            with open(temp_output_path, 'rb') as result_file:
+                result_data = result_file.read()
+
+            # Cleanup temporary files
+            import os
+            os.unlink(temp_input_path)
+            os.unlink(temp_output_path)
+
+            return BytesIO(result_data)
+
+        except Exception as e:
+            # If anything fails, return the original file unchanged
+            return BytesIO(original_file_data)
+
+    @staticmethod
+    def _replace_file_in_zip(zip_path: str, target_file: str, new_content: bytes):
+        """Replace a specific file within a ZIP archive"""
+
+        import zipfile
+        import tempfile
+        import os
+
+        # Create temporary ZIP file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as temp_zip:
+            temp_zip_path = temp_zip.name
+
+        # Copy all files except the target file to new ZIP
+        with zipfile.ZipFile(zip_path, 'r') as source_zip:
+            with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as target_zip:
+                for item in source_zip.infolist():
+                    if item.filename != target_file:
+                        # Copy unchanged
+                        data = source_zip.read(item.filename)
+                        target_zip.writestr(item, data)
+
+                # Add the new content
+                target_zip.writestr(target_file, new_content)
+
+        # Replace original with updated ZIP
+        os.replace(temp_zip_path, zip_path)
 
     @staticmethod
     def _update_comments_in_original_docx(original_file_data: bytes, sections: Dict[str, ParsedSection]) -> BytesIO:
@@ -1171,66 +1253,33 @@ class DocxExporter:
             return DocxExporter._create_comments_xml(sections)
 
     @staticmethod
-    def _create_safe_docx_with_sections(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
-        """Create a clean, safe DOCX document with sections and embedded prompts as text"""
+    def _create_clean_docx_with_embedded_comments(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
+        """Create a clean DOCX document with ONLY headings and embedded comments (no visible prompts)"""
 
-        # Create a new document using python-docx (safe and reliable)
+        # Create a minimal document with only section headings
         doc = Document()
 
-        # Add document title
+        # Add title
         title = doc.add_heading(template_name, 0)
 
-        # Add generation info
-        info_para = doc.add_paragraph()
-        info_para.add_run(f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}").italic = True
-        info_para.add_run("\nKlarity Template Comparison Tool").italic = True
-
-        doc.add_paragraph("")  # Spacing
-
-        # Add sections in proper Klarity format
+        # Add sections with ONLY the headings (no visible prompt content)
         for section_name, section in sections.items():
-            # Add section heading
+            # Add section heading only - no other content
             heading = doc.add_heading(section_name, level=1)
 
-            # Add a paragraph with the prompt as a comment-style format
-            # This approach embeds the prompts as visible text in a structured way
-            # that can be easily processed by Klarity or manually converted
-
-            comment_text = DocxExporter.build_comment_string(section)
-
-            # Create a bordered text box to visually separate the prompt instructions
-            prompt_para = doc.add_paragraph()
-            prompt_run = prompt_para.add_run(f"[PROMPT INSTRUCTIONS]\n{comment_text}")
-            prompt_run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)  # Gray color
-            prompt_run.font.size = Pt(9)
-            prompt_run.font.italic = True
-
-            # Add placeholder content based on section type
-            if section.type == 'table':
-                placeholder = '[AI will generate table content here based on the above prompt instructions.]'
-            elif section.sub_type == 'bulleted':
-                placeholder = '[AI will generate bullet-point content here based on the above prompt instructions.]'
-            elif section.sub_type == 'flow-diagram':
-                placeholder = '[AI will generate process flow description here based on the above prompt instructions.]'
-            elif section.sub_type == 'walkthrough-steps':
-                placeholder = '[AI will generate step-by-step instructions here based on the above prompt instructions.]'
-            else:
-                placeholder = '[AI will generate paragraph-based content here based on the above prompt instructions.]'
-
-            content_para = doc.add_paragraph(placeholder)
-            doc.add_paragraph("")  # Spacing
-
-        # Save the document to buffer
+        # Save the initial document
         buffer = BytesIO()
         doc.save(buffer)
         buffer.seek(0)
-        return buffer
+
+        # Now add embedded comments to the document using ZIP manipulation
+        return DocxExporter._add_comments_to_docx(buffer, sections)
 
     @staticmethod
     def _create_new_docx_with_sections(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
         """Fallback: Create new document (used when no original file available)"""
 
-        return DocxExporter._create_safe_docx_with_sections(template_name, sections)
+        return DocxExporter._create_clean_docx_with_embedded_comments(template_name, sections)
 
     @staticmethod
     def _add_comments_to_docx(buffer: BytesIO, sections: Dict[str, ParsedSection]) -> BytesIO:

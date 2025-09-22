@@ -762,29 +762,29 @@ class SectionMatcher:
         return unmapped1, unmapped2
 
 class DocxExporter:
-    """Export templates back to Klarity-friendly DOCX format"""
+    """Export templates back to Klarity-friendly DOCX format with proper embedded comments"""
 
     @staticmethod
     def build_comment_string(section: ParsedSection) -> str:
-        """Build comment string in Klarity format"""
+        """Build comment string in Klarity concatenated format"""
 
         # Escape newlines as literal \n like the original system expects
         prompt_escaped = (section.prompt or '').replace('\r\n', '\n').replace('\n', '\\n')
 
-        # Klarity-friendly format matching the original system
-        comment_params = [
-            f"type - {section.type}",
-            f"sub_type - {section.sub_type}",
-            f"prompt - {prompt_escaped}",
-            f"include_screenshots - {'yes' if section.include_screenshots else 'no'}",
+        # Build in the exact concatenated format found in Alex's templates
+        comment_string = (
+            f"type - {section.type}"
+            f"sub_type - {section.sub_type}"
+            f"prompt - {prompt_escaped}"
+            f"include_screenshots - {'yes' if section.include_screenshots else 'no'}"
             f"screenshot_instructions - {section.screenshot_instructions or 'none'}"
-        ]
+        )
 
-        return '\n'.join(comment_params)
+        return comment_string
 
     @staticmethod
     def export_template_to_docx(template_name: str, sections: Dict[str, ParsedSection]) -> BytesIO:
-        """Export sections to a Klarity-ready DOCX file"""
+        """Export sections to a Klarity-ready DOCX file with proper embedded comments"""
 
         # Create a new document
         doc = Document()
@@ -799,22 +799,12 @@ class DocxExporter:
 
         doc.add_paragraph("")  # Spacing
 
-        # Add sections
+        # Add sections with proper placeholder content (no embedded comments in text)
         for section_name, section in sections.items():
             # Add section heading
             heading = doc.add_heading(section_name, level=1)
 
-            # Add comment to heading (this is a simplified approach)
-            # Note: docx library doesn't support comments directly, but we can add
-            # the comment data as hidden text or in a structured way
-            comment_text = DocxExporter.build_comment_string(section)
-
-            # Add comment as a hidden paragraph (for manual processing)
-            comment_para = doc.add_paragraph()
-            comment_run = comment_para.add_run(f"[COMMENT: {comment_text}]")
-            comment_run.font.color.rgb = None  # This will be processed by Klarity
-
-            # Add placeholder content
+            # Add only placeholder content based on section type
             if section.type == 'table':
                 placeholder = '[AI will generate table content here based on the embedded prompt instructions.]'
             elif section.sub_type == 'bulleted':
@@ -832,12 +822,194 @@ class DocxExporter:
             content_para = doc.add_paragraph(placeholder)
             doc.add_paragraph("")  # Spacing
 
-        # Save to BytesIO
+        # Save the initial document
         buffer = BytesIO()
         doc.save(buffer)
         buffer.seek(0)
 
-        return buffer
+        # Now we need to manually add comments to the DOCX ZIP structure
+        # Since python-docx doesn't support comments directly, we'll modify the ZIP
+        return DocxExporter._add_comments_to_docx(buffer, sections)
+
+    @staticmethod
+    def _add_comments_to_docx(buffer: BytesIO, sections: Dict[str, ParsedSection]) -> BytesIO:
+        """Add comments to an existing DOCX by modifying its ZIP structure"""
+
+        import zipfile
+        import tempfile
+        from xml.dom import minidom
+        import uuid
+
+        # Read the existing DOCX
+        buffer.seek(0)
+        docx_zip = zipfile.ZipFile(buffer, 'r')
+
+        # Create a new DOCX with comments
+        new_buffer = BytesIO()
+        new_docx = zipfile.ZipFile(new_buffer, 'w', zipfile.ZIP_DEFLATED)
+
+        try:
+            # Copy all existing files
+            for item in docx_zip.infolist():
+                data = docx_zip.read(item.filename)
+                if item.filename == 'word/document.xml':
+                    # Modify document.xml to add comment references
+                    data = DocxExporter._add_comment_references_to_document(data, sections)
+                elif item.filename == '[Content_Types].xml':
+                    # Update content types to include comments
+                    data = DocxExporter._update_content_types(data)
+                elif item.filename == 'word/_rels/document.xml.rels':
+                    # Update relationships to include comments
+                    data = DocxExporter._update_document_rels(data)
+
+                new_docx.writestr(item, data)
+
+            # Add comments.xml
+            comments_xml = DocxExporter._create_comments_xml(sections)
+            new_docx.writestr('word/comments.xml', comments_xml)
+
+        finally:
+            docx_zip.close()
+            new_docx.close()
+
+        new_buffer.seek(0)
+        return new_buffer
+
+    @staticmethod
+    def _add_comment_references_to_document(document_xml_data: bytes, sections: Dict[str, ParsedSection]) -> bytes:
+        """Add comment references to section headings in document.xml"""
+
+        try:
+            # Parse the document XML
+            doc = minidom.parseString(document_xml_data.decode('utf-8'))
+
+            # Find all heading paragraphs and add comment references
+            comment_id = 0
+            paragraphs = doc.getElementsByTagName('w:p')
+
+            for paragraph in paragraphs:
+                # Check if this is a heading with style
+                pPr = paragraph.getElementsByTagName('w:pPr')
+                if pPr:
+                    pStyle = pPr[0].getElementsByTagName('w:pStyle')
+                    if pStyle and pStyle[0].getAttribute('w:val').startswith('Heading'):
+                        # Get the heading text
+                        text_runs = paragraph.getElementsByTagName('w:t')
+                        if text_runs:
+                            heading_text = ''.join([t.firstChild.nodeValue for t in text_runs if t.firstChild])
+
+                            # Check if this heading matches one of our sections
+                            if heading_text in sections:
+                                comment_id += 1
+
+                                # Add comment range start
+                                commentRangeStart = doc.createElement('w:commentRangeStart')
+                                commentRangeStart.setAttribute('w:id', str(comment_id))
+                                paragraph.insertBefore(commentRangeStart, paragraph.firstChild)
+
+                                # Add comment range end
+                                commentRangeEnd = doc.createElement('w:commentRangeEnd')
+                                commentRangeEnd.setAttribute('w:id', str(comment_id))
+                                paragraph.appendChild(commentRangeEnd)
+
+                                # Add comment reference
+                                commentReference = doc.createElement('w:commentReference')
+                                commentReference.setAttribute('w:id', str(comment_id))
+
+                                # Create a new run for the comment reference
+                                run = doc.createElement('w:r')
+                                run.appendChild(commentReference)
+                                paragraph.appendChild(run)
+
+            return doc.toxml(encoding='utf-8')
+
+        except Exception as e:
+            # If we can't parse/modify, return original
+            return document_xml_data
+
+    @staticmethod
+    def _create_comments_xml(sections: Dict[str, ParsedSection]) -> str:
+        """Create the comments.xml file with our section comments"""
+
+        comments_xml = '''<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'''
+
+        comment_id = 0
+        for section_name, section in sections.items():
+            comment_id += 1
+            comment_text = DocxExporter.build_comment_string(section)
+
+            # Escape XML special characters
+            comment_text_escaped = comment_text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+            comments_xml += f'''
+    <w:comment w:id="{comment_id}" w:author="Klarity Template Comparison Tool" w:date="{datetime.datetime.now().isoformat()}" w:initials="KTCT">
+        <w:p>
+            <w:pPr>
+                <w:pStyle w:val="CommentText"/>
+            </w:pPr>
+            <w:r>
+                <w:rPr>
+                    <w:rStyle w:val="CommentReference"/>
+                </w:rPr>
+                <w:annotationRef/>
+            </w:r>
+            <w:r>
+                <w:t>{comment_text_escaped}</w:t>
+            </w:r>
+        </w:p>
+    </w:comment>'''
+
+        comments_xml += '''
+</w:comments>'''
+
+        return comments_xml
+
+    @staticmethod
+    def _update_content_types(content_types_data: bytes) -> bytes:
+        """Update [Content_Types].xml to include comments"""
+
+        try:
+            content_types_str = content_types_data.decode('utf-8')
+
+            # Add comments override if not present
+            if 'word/comments.xml' not in content_types_str:
+                # Insert before the closing tag
+                insert_pos = content_types_str.rfind('</Types>')
+                if insert_pos != -1:
+                    comment_override = '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/>'
+                    content_types_str = content_types_str[:insert_pos] + comment_override + content_types_str[insert_pos:]
+
+            return content_types_str.encode('utf-8')
+
+        except Exception as e:
+            return content_types_data
+
+    @staticmethod
+    def _update_document_rels(rels_data: bytes) -> bytes:
+        """Update document.xml.rels to include comments relationship"""
+
+        try:
+            rels_str = rels_data.decode('utf-8')
+
+            # Add comments relationship if not present
+            if 'comments.xml' not in rels_str:
+                # Find the highest rId
+                import re
+                rids = re.findall(r'rId(\d+)', rels_str)
+                max_rid = max([int(rid) for rid in rids]) if rids else 0
+                new_rid = max_rid + 1
+
+                # Insert before the closing tag
+                insert_pos = rels_str.rfind('</Relationships>')
+                if insert_pos != -1:
+                    comment_rel = f'<Relationship Id="rId{new_rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+                    rels_str = rels_str[:insert_pos] + comment_rel + rels_str[insert_pos:]
+
+            return rels_str.encode('utf-8')
+
+        except Exception as e:
+            return rels_data
 
 class DiffViewer:
     """Generate and display diffs between two text strings"""

@@ -1513,12 +1513,11 @@ def main():
         st.metric("📊 Avg Sections/File", f"{avg_sections:.1f}")
 
     # Create enhanced tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📋 Browse All",
         "🔗 Smart Mapping",
         "⚡ Deviation Analysis",
-        "✏️ Edit & Compare",
-        "🔍 Diff Analysis",
+        "🚀 Edit & Compare",
         "📤 Export"
     ])
 
@@ -1532,12 +1531,9 @@ def main():
         deviation_analysis(all_sections)
 
     with tab4:
-        edit_and_compare(all_sections)
+        edit_and_compare_enhanced(all_sections)
 
     with tab5:
-        diff_analysis(all_sections)
-
-    with tab6:
         export_templates(all_sections)
 
 
@@ -1984,29 +1980,116 @@ def smart_section_mapping(all_sections: Dict[str, Dict[str, ParsedSection]], thr
             st.success(f"✅ {len(manual_mappings)} manual mappings added")
 
 
-def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
-    """Tab 3: Edit prompts and compare side-by-side"""
+def edit_and_compare_enhanced(all_sections: Dict[str, Dict[str, ParsedSection]]):
+    """Enhanced tab: Edit and compare prompts between two templates side-by-side"""
 
-    st.header("✏️ Edit & Compare Prompts")
+    st.header("🚀 Edit & Compare Prompts")
 
-    # File and section selection
+    if len(all_sections) < 2:
+        st.info("📋 Upload at least 2 files for side-by-side comparison and editing")
+
+        # Show single file editing interface if only one file
+        if len(all_sections) == 1:
+            file_name = list(all_sections.keys())[0]
+            st.subheader(f"✏️ Single File Editing: {file_name}")
+            _render_single_file_editor(all_sections, file_name)
+        return
+
+    # Dual template selection with intelligent matching
     file_names = list(all_sections.keys())
 
     col1, col2 = st.columns(2)
     with col1:
-        selected_file = st.selectbox("Select template to edit:", file_names, key="edit_file")
+        st.markdown("**📄 Template A**")
+        file_a = st.selectbox("Select first template:", file_names, key="enhanced_file_a")
     with col2:
-        if selected_file:
-            sections = all_sections[selected_file]
-            section_names = list(sections.keys()) if sections else []
-            selected_section = st.selectbox("Select section:", section_names, key="edit_section")
+        st.markdown("**📄 Template B**")
+        file_b = st.selectbox("Select second template:", [f for f in file_names if f != file_a], key="enhanced_file_b")
 
-    if not selected_file or not selected_section:
-        st.info("Select a file and section to continue")
+    if not file_a or not file_b:
+        st.info("Select two templates to continue")
         return
 
-    section = all_sections[selected_file][selected_section]
-    section_key = f"{selected_file}::{selected_section}"
+    sections_a = all_sections[file_a]
+    sections_b = all_sections[file_b]
+
+    # Section selection with intelligent matching
+    all_sections_a = list(sections_a.keys())
+    all_sections_b = list(sections_b.keys())
+
+    col1, col2 = st.columns(2)
+    with col1:
+        section_a = st.selectbox(f"Section from {file_a}:", all_sections_a, key="enhanced_section_a")
+    with col2:
+        # Smart suggestion for section_b based on section_a
+        if section_a:
+            if section_a in sections_b:
+                default_idx = all_sections_b.index(section_a)
+            else:
+                # Find best match using fuzzy matching
+                from fuzzywuzzy import process, fuzz
+                matches = process.extract(section_a, all_sections_b, limit=3, scorer=fuzz.ratio)
+                if matches and matches[0][1] >= 70:
+                    default_idx = all_sections_b.index(matches[0][0])
+                else:
+                    default_idx = 0
+        else:
+            default_idx = 0
+
+        section_b = st.selectbox(
+            f"Section from {file_b}:",
+            all_sections_b,
+            index=default_idx,
+            key="enhanced_section_b"
+        )
+
+    if not section_a or not section_b:
+        st.info("Select sections from both templates")
+        return
+
+    # Get the actual sections
+    sec_a = sections_a[section_a]
+    sec_b = sections_b[section_b]
+
+    # Display comparison metrics
+    st.subheader(f"📊 Comparing: {section_a} ↔ {section_b}")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric(f"{file_a} Length", f"{len(sec_a.prompt):,} chars")
+    with col2:
+        st.metric(f"{file_b} Length", f"{len(sec_b.prompt):,} chars")
+    with col3:
+        diff_chars = len(sec_b.prompt) - len(sec_a.prompt)
+        st.metric("Difference", f"{diff_chars:+,} chars")
+    with col4:
+        from fuzzywuzzy import fuzz
+        similarity = fuzz.ratio(sec_a.prompt, sec_b.prompt)
+        st.metric("Similarity", f"{similarity}%")
+
+    st.divider()
+
+    # Enhanced side-by-side editing interface
+    _render_dual_editing_interface(file_a, file_b, section_a, section_b, sec_a, sec_b)
+
+
+def _render_single_file_editor(all_sections: Dict[str, Dict[str, ParsedSection]], file_name: str):
+    """Render single file editing interface when only one file is available"""
+
+    sections = all_sections[file_name]
+    section_names = list(sections.keys()) if sections else []
+
+    if not section_names:
+        st.info("No sections found in the selected file")
+        return
+
+    selected_section = st.selectbox("Select section:", section_names, key="single_edit_section")
+
+    if not selected_section:
+        return
+
+    section = sections[selected_section]
+    section_key = f"{file_name}::{selected_section}"
 
     # Initialize edited sections in session state
     if section_key not in st.session_state.edited_sections:
@@ -2020,14 +2103,11 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
 
     edited_data = st.session_state.edited_sections[section_key]
 
-    st.subheader(f"✏️ Editing: {selected_section}")
-
-    # Editing interface
+    # Simple editing interface
     col1, col2 = st.columns(2)
 
     with col1:
         st.markdown("**📝 Edit Prompt:**")
-
         new_prompt = st.text_area(
             "Prompt content:",
             value=edited_data['prompt'],
@@ -2035,263 +2115,242 @@ def edit_and_compare(all_sections: Dict[str, Dict[str, ParsedSection]]):
             help="Edit the prompt text here"
         )
 
-        # Section properties with error handling
-        col1a, col1b = st.columns(2)
-        with col1a:
-            type_options = ['text', 'table']
-            current_type = edited_data.get('type', 'text')
-            if current_type not in type_options:
-                current_type = 'text'
+        # Properties
+        _render_properties_editor("single", edited_data, key_suffix="single")
 
-            new_type = st.selectbox(
-                "Type:",
-                options=type_options,
-                index=type_options.index(current_type)
-            )
-
-        with col1b:
-            subtype_options = ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']
-            current_subtype = edited_data.get('sub_type', 'default')
-            # Handle legacy or special subtypes
-            if current_subtype == 'bpmn':
-                current_subtype = 'flow-diagram'
-            elif current_subtype not in subtype_options:
-                current_subtype = 'default'
-
-            new_sub_type = st.selectbox(
-                "Sub-type:",
-                options=subtype_options,
-                index=subtype_options.index(current_subtype)
-            )
-
-        new_include_screenshots = st.checkbox(
-            "Include screenshots",
-            value=edited_data['include_screenshots']
-        )
-
-        if new_include_screenshots:
-            new_screenshot_instructions = st.text_area(
-                "Screenshot instructions:",
-                value=edited_data['screenshot_instructions'],
-                height=60
-            )
-        else:
-            new_screenshot_instructions = ""
-
-        # Save changes
-        if st.button("💾 Save Changes", type="primary"):
-            st.session_state.edited_sections[section_key] = {
-                'prompt': new_prompt,
-                'type': new_type,
-                'sub_type': new_sub_type,
-                'include_screenshots': new_include_screenshots,
-                'screenshot_instructions': new_screenshot_instructions
-            }
-
-            # Update the actual section object
-            section.prompt = new_prompt
-            section.type = new_type
-            section.sub_type = new_sub_type
-            section.include_screenshots = new_include_screenshots
-            section.screenshot_instructions = new_screenshot_instructions
-            section.edited = True
-
-            st.success("✅ Changes saved!")
-            st.rerun()
+        # Save button
+        if st.button("💾 Save Changes", type="primary", key="single_save"):
+            _save_section_changes(section_key, section, new_prompt, edited_data)
 
     with col2:
         st.markdown("**👁️ Live Preview:**")
+        _render_preview(new_prompt, section)
 
-        # Enhanced formatted preview
-        formatted_prompt = PromptFormatter.format_prompt_for_display(new_prompt)
 
-        # Display with enhanced styling
-        st.markdown(
-            f"""
-            <div style="
-                background-color: #f8f9fa;
-                padding: 1rem;
-                border-radius: 0.5rem;
-                border-left: 4px solid #28a745;
-                line-height: 1.6;
-                max-height: 400px;
-                overflow-y: auto;
-                color: #212529;
-            ">
-            {formatted_prompt.replace(chr(10), '<br>')}
-            </div>
-            """,
-            unsafe_allow_html=True
+def _render_dual_editing_interface(file_a: str, file_b: str, section_a: str, section_b: str, sec_a: ParsedSection, sec_b: ParsedSection):
+    """Render the dual editing interface with side-by-side comparison and editing"""
+
+    # Initialize session state for both sections
+    section_key_a = f"{file_a}::{section_a}"
+    section_key_b = f"{file_b}::{section_b}"
+
+    if section_key_a not in st.session_state.edited_sections:
+        st.session_state.edited_sections[section_key_a] = {
+            'prompt': sec_a.prompt,
+            'type': sec_a.type,
+            'sub_type': sec_a.sub_type,
+            'include_screenshots': sec_a.include_screenshots,
+            'screenshot_instructions': sec_a.screenshot_instructions
+        }
+
+    if section_key_b not in st.session_state.edited_sections:
+        st.session_state.edited_sections[section_key_b] = {
+            'prompt': sec_b.prompt,
+            'type': sec_b.type,
+            'sub_type': sec_b.sub_type,
+            'include_screenshots': sec_b.include_screenshots,
+            'screenshot_instructions': sec_b.screenshot_instructions
+        }
+
+    edited_data_a = st.session_state.edited_sections[section_key_a]
+    edited_data_b = st.session_state.edited_sections[section_key_b]
+
+    # Side-by-side editing interface
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.markdown(f"**📝 Edit Template A: {file_a}**")
+        new_prompt_a = st.text_area(
+            f"Prompt content for {section_a}:",
+            value=edited_data_a['prompt'],
+            height=300,
+            help="Edit the prompt text for template A",
+            key="edit_prompt_a"
         )
 
-        st.divider()
+        # Properties for Template A
+        _render_properties_editor("Template A", edited_data_a, key_suffix="a")
 
-        # Show changes indicator with better formatting
-        if new_prompt != section.original_prompt:
-            st.warning("✏️ **Modified from original**")
-
-            # Show character difference
-            original_len = len(section.original_prompt)
-            new_len = len(new_prompt)
-            diff = new_len - original_len
-
-            col2a, col2b, col2c = st.columns(3)
-            with col2a:
-                st.metric("Original", f"{original_len:,} chars")
-            with col2b:
-                st.metric("Current", f"{new_len:,} chars")
-            with col2c:
-                st.metric("Change", f"{diff:+,}")
-
-        else:
-            st.success("✅ **Matches original**")
-
-        st.divider()
-
-        # Action buttons
-        col2a, col2b = st.columns(2)
-        with col2a:
-            if st.button("🔄 Reset", help="Reset to original content"):
-                st.session_state.edited_sections[section_key]['prompt'] = section.original_prompt
-                section.prompt = section.original_prompt
-                section.edited = False
-                st.success("✅ Reset to original")
+        # Action buttons for Template A
+        col_a1, col_a2, col_a3 = st.columns(3)
+        with col_a1:
+            if st.button("💾 Save A", type="primary", key="save_a"):
+                _save_section_changes(section_key_a, sec_a, new_prompt_a, edited_data_a)
+        with col_a2:
+            if st.button("📋 Copy B→A", key="copy_b_to_a"):
+                st.session_state.edited_sections[section_key_a]['prompt'] = edited_data_b['prompt']
                 st.rerun()
+        with col_a3:
+            if st.button("🔄 Reset A", key="reset_a"):
+                _reset_section(section_key_a, sec_a)
 
-        with col2b:
-            if st.button("📋 Copy", help="Copy current content"):
-                st.success("Copied to clipboard!")
-
-
-def diff_analysis(all_sections: Dict[str, Dict[str, ParsedSection]]):
-    """Tab 4: Advanced diff analysis between sections"""
-
-    st.header("🔍 Advanced Diff Analysis")
-
-    if len(all_sections) < 2:
-        st.info("📋 Upload at least 2 files for diff analysis")
-        return
-
-    # File and section selection with intelligent matching
-    file_names = list(all_sections.keys())
-
-    col1, col2 = st.columns(2)
-    with col1:
-        file1 = st.selectbox("First template:", file_names, key="diff_file1")
-    with col2:
-        file2 = st.selectbox("Second template:", [f for f in file_names if f != file1], key="diff_file2")
-
-    if not file1 or not file2:
-        st.info("Select two files to continue")
-        return
-
-    sections1 = all_sections[file1]
-    sections2 = all_sections[file2]
-
-    # Section selection with smart suggestions
-    all_sections1 = list(sections1.keys())
-    all_sections2 = list(sections2.keys())
-
-    col1, col2 = st.columns(2)
-    with col1:
-        section1 = st.selectbox(f"Section from {file1}:", all_sections1, key="diff_section1")
-    with col2:
-        # Smart suggestion for section2 based on section1
-        if section1:
-            if section1 in sections2:
-                default_idx = all_sections2.index(section1)
-            else:
-                # Find best match using fuzzy matching
-                matches = process.extract(section1, all_sections2, limit=3, scorer=fuzz.ratio)
-                if matches and matches[0][1] >= 70:
-                    default_idx = all_sections2.index(matches[0][0])
-                else:
-                    default_idx = 0
-        else:
-            default_idx = 0
-
-        section2 = st.selectbox(
-            f"Section from {file2}:",
-            all_sections2,
-            index=default_idx,
-            key="diff_section2"
+    with col_b:
+        st.markdown(f"**📝 Edit Template B: {file_b}**")
+        new_prompt_b = st.text_area(
+            f"Prompt content for {section_b}:",
+            value=edited_data_b['prompt'],
+            height=300,
+            help="Edit the prompt text for template B",
+            key="edit_prompt_b"
         )
 
-    if not section1 or not section2:
-        st.info("Select sections from both files")
-        return
+        # Properties for Template B
+        _render_properties_editor("Template B", edited_data_b, key_suffix="b")
 
-    # Get the actual sections
-    sec1 = sections1[section1]
-    sec2 = sections2[section2]
+        # Action buttons for Template B
+        col_b1, col_b2, col_b3 = st.columns(3)
+        with col_b1:
+            if st.button("💾 Save B", type="primary", key="save_b"):
+                _save_section_changes(section_key_b, sec_b, new_prompt_b, edited_data_b)
+        with col_b2:
+            if st.button("📋 Copy A→B", key="copy_a_to_b"):
+                st.session_state.edited_sections[section_key_b]['prompt'] = edited_data_a['prompt']
+                st.rerun()
+        with col_b3:
+            if st.button("🔄 Reset B", key="reset_b"):
+                _reset_section(section_key_b, sec_b)
 
-    # Display section comparison
-    st.subheader(f"📊 Comparing: {section1} ↔ {section2}")
+    # Central action buttons
+    st.divider()
+    col_center1, col_center2, col_center3 = st.columns([1, 2, 1])
+    with col_center2:
+        if st.button("💾 Save Both Templates", type="primary", key="save_both"):
+            _save_section_changes(section_key_a, sec_a, new_prompt_a, edited_data_a)
+            _save_section_changes(section_key_b, sec_b, new_prompt_b, edited_data_b)
+            st.success("✅ Both templates saved!")
 
-    # Quick stats
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("File 1 Length", f"{len(sec1.prompt):,} chars")
-    with col2:
-        st.metric("File 2 Length", f"{len(sec2.prompt):,} chars")
-    with col3:
-        diff_chars = len(sec2.prompt) - len(sec1.prompt)
-        st.metric("Difference", f"{diff_chars:+,} chars")
-    with col4:
-        similarity = fuzz.ratio(sec1.prompt, sec2.prompt)
-        st.metric("Similarity", f"{similarity}%")
-
-    # Format prompts for comparison
-    prompt1 = PromptFormatter.json_to_markdown(sec1.prompt)
-    prompt2 = PromptFormatter.json_to_markdown(sec2.prompt)
-
-    # Diff visualization
-    st.subheader("🎨 Visual Diff")
-
-    diff_html = DiffViewer.generate_diff_html(prompt1, prompt2, file1, file2)
-    st.markdown(diff_html, unsafe_allow_html=True)
-
-    # Enhanced side-by-side comparison
-    st.subheader("📄 Side-by-Side Comparison")
+    # Enhanced side-by-side comparison with diff highlighting
+    st.subheader("📄 Side-by-Side Comparison with Diff Highlighting")
 
     UIComponents.create_side_by_side_comparison(
-        section_name=f"{section1} vs {section2}",
-        section1=sec1,
-        section2=sec2,
-        file1_name=file1,
-        file2_name=file2
+        section_name=f"{section_a} vs {section_b}",
+        section1=sec_a,
+        section2=sec_b,
+        file1_name=file_a,
+        file2_name=file_b
     )
 
-    # Analysis insights
-    st.subheader("🧠 Analysis Insights")
 
-    insights = []
+def _render_properties_editor(template_name: str, edited_data: dict, key_suffix: str):
+    """Render the properties editing interface"""
 
-    if diff_chars > 100:
-        insights.append(f"📈 File 2 is significantly longer ({diff_chars:+,} characters)")
-    elif diff_chars < -100:
-        insights.append(f"📉 File 1 is significantly longer ({abs(diff_chars):,} characters)")
+    col1, col2 = st.columns(2)
+    with col1:
+        new_type = st.selectbox(
+            "Type:",
+            options=['text', 'table'],
+            index=0 if edited_data['type'] == 'text' else 1,
+            key=f"type_{key_suffix}"
+        )
+        edited_data['type'] = new_type
+
+    with col2:
+        subtype_options = ['default', 'bulleted', 'freeform', 'flow-diagram', 'walkthrough-steps']
+        current_subtype = edited_data.get('sub_type', 'default')
+        if current_subtype == 'bpmn':
+            current_subtype = 'flow-diagram'
+        elif current_subtype not in subtype_options:
+            current_subtype = 'default'
+
+        new_sub_type = st.selectbox(
+            "Sub-type:",
+            options=subtype_options,
+            index=subtype_options.index(current_subtype),
+            key=f"subtype_{key_suffix}"
+        )
+        edited_data['sub_type'] = new_sub_type
+
+    new_include_screenshots = st.checkbox(
+        "Include screenshots",
+        value=edited_data['include_screenshots'],
+        key=f"screenshots_{key_suffix}"
+    )
+    edited_data['include_screenshots'] = new_include_screenshots
+
+    if new_include_screenshots:
+        new_screenshot_instructions = st.text_area(
+            "Screenshot instructions:",
+            value=edited_data['screenshot_instructions'],
+            height=60,
+            key=f"screenshot_inst_{key_suffix}"
+        )
+        edited_data['screenshot_instructions'] = new_screenshot_instructions
     else:
-        insights.append("📊 Both prompts have similar length")
+        edited_data['screenshot_instructions'] = ""
 
-    if similarity >= 90:
-        insights.append("✅ Prompts are very similar (90%+ match)")
-    elif similarity >= 70:
-        insights.append("🔄 Prompts are moderately similar (70-89% match)")
+
+def _save_section_changes(section_key: str, section: ParsedSection, new_prompt: str, edited_data: dict):
+    """Save changes to a section"""
+
+    st.session_state.edited_sections[section_key] = {
+        'prompt': new_prompt,
+        'type': edited_data['type'],
+        'sub_type': edited_data['sub_type'],
+        'include_screenshots': edited_data['include_screenshots'],
+        'screenshot_instructions': edited_data['screenshot_instructions']
+    }
+
+    # Update the actual section object
+    section.prompt = new_prompt
+    section.type = edited_data['type']
+    section.sub_type = edited_data['sub_type']
+    section.include_screenshots = edited_data['include_screenshots']
+    section.screenshot_instructions = edited_data['screenshot_instructions']
+    section.edited = True
+
+    st.success("✅ Changes saved!")
+
+
+def _reset_section(section_key: str, section: ParsedSection):
+    """Reset a section to its original state"""
+
+    st.session_state.edited_sections[section_key]['prompt'] = section.original_prompt
+    section.prompt = section.original_prompt
+    section.edited = False
+    st.success("✅ Reset to original")
+    st.rerun()
+
+
+def _render_preview(prompt: str, section: ParsedSection):
+    """Render a formatted preview of the prompt"""
+
+    formatted_prompt = PromptFormatter.format_prompt_for_display(prompt)
+
+    st.markdown(
+        f"""
+        <div style="
+            background-color: #f8f9fa;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border-left: 4px solid #28a745;
+            line-height: 1.6;
+            max-height: 400px;
+            overflow-y: auto;
+            color: #212529;
+        ">
+        {formatted_prompt.replace(chr(10), '<br>')}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Show changes indicator
+    if prompt != section.original_prompt:
+        st.warning("✏️ **Modified from original**")
+
+        original_len = len(section.original_prompt)
+        new_len = len(prompt)
+        diff = new_len - original_len
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Original", f"{original_len:,} chars")
+        with col2:
+            st.metric("Current", f"{new_len:,} chars")
+        with col3:
+            st.metric("Change", f"{diff:+,}")
     else:
-        insights.append("⚠️ Prompts are quite different (<70% match)")
-
-    if sec1.type != sec2.type:
-        insights.append(f"🔄 Different types: {sec1.type} vs {sec2.type}")
-
-    if sec1.sub_type != sec2.sub_type:
-        insights.append(f"🔄 Different sub-types: {sec1.sub_type} vs {sec2.sub_type}")
-
-    if sec1.include_screenshots != sec2.include_screenshots:
-        insights.append("📷 Different screenshot requirements")
-
-    for insight in insights:
-        st.info(insight)
+        st.success("✅ **Matches original**")
 
 
 def export_templates(all_sections: Dict[str, Dict[str, ParsedSection]]):
